@@ -20,6 +20,9 @@ public class Room {
     @Column(nullable = false, unique = true)
     private String name;
 
+    @Column(nullable = false, length = 20)
+    private String type;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

@@ -13,12 +13,13 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 @Builder
 public class Message {
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @Column(nullable = false, length = 50)
-    private String type; // 'people' or 'room'
+    private String type; // 'people' hoặc 'room'
 
     @Column(nullable = false)
     private String sender;
@@ -28,6 +29,14 @@ public class Message {
 
     @Lob
     private String content;
+
+    @Builder.Default
+    @Column(nullable = false)
+    private Boolean recalled = false;
+
+    @Builder.Default
+    @Column(nullable = false)
+    private Boolean edited = false;
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)

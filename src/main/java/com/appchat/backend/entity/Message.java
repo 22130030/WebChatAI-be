@@ -38,6 +38,16 @@ public class Message {
     @Column(nullable = false)
     private Boolean edited = false;
 
+    @Builder.Default
+    @Column(nullable = false, length = 20)
+    private String status = "SENT";
+
+    @Column(name = "delivered_at")
+    private LocalDateTime deliveredAt;
+
+    @Column(name = "read_at")
+    private LocalDateTime readAt;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

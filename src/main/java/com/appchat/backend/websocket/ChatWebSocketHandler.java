@@ -8,6 +8,7 @@ import com.appchat.backend.entity.RoomMember;
 import com.appchat.backend.entity.User;
 import com.appchat.backend.repository.GroupThemeRepository;
 import com.appchat.backend.repository.MessageRepository;
+import com.appchat.backend.repository.PendingConversationRepository;
 import com.appchat.backend.repository.RoomMemberRepository;
 import com.appchat.backend.repository.RoomRepository;
 import com.appchat.backend.repository.UserRepository;
@@ -28,6 +29,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
@@ -39,6 +41,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final MessageRepository messageRepository;
     private final RoomRepository roomRepository;
     private final RoomMemberRepository roomMemberRepository;
+    private final PendingConversationRepository pendingConversationRepository;
     private final GroupThemeRepository groupThemeRepository;
     private final JwtUtil jwtUtil;
     private final PasswordEncoder passwordEncoder;
@@ -148,6 +151,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
             case "SEND_CHAT":
                 handleSendChat(session, data);
+                break;
+
+            case "MARK_READ":
+                handleMarkRead(session, data);
+                break;
+
+            case "TYPING":
+            case "STOP_TYPING":
+                handleTyping(session, event, data);
                 break;
 
             case "RECALL_MESSAGE":
@@ -445,21 +457,25 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         List<Map<String, Object>> responseList = new ArrayList<>();
 
-        for (User user : userRepository.findAll()) {
-            if (!user.getUsername().equals(username)) {
+        for (var conversation : pendingConversationRepository.findAcceptedConversations(username)) {
+            String friendUsername = username.equals(conversation.getFromUsername())
+                    ? conversation.getToUsername()
+                    : conversation.getFromUsername();
+
+            userRepository.findByUsername(friendUsername).ifPresent(user -> {
                 Map<String, Object> userData = new LinkedHashMap<>();
 
                 userData.put("name", user.getUsername());
                 userData.put("type", 0);
                 userData.put(
                         "actionTime",
-                        user.getCreatedAt() != null
-                                ? user.getCreatedAt().toString()
+                        conversation.getUpdatedAt() != null
+                                ? conversation.getUpdatedAt().toString()
                                 : LocalDateTime.now().toString()
                 );
 
                 responseList.add(userData);
-            }
+            });
         }
 
         for (RoomMember roomMember : roomMemberRepository.findByUsername(username)) {
@@ -616,9 +632,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 .content(messageContent)
                 .recalled(false)
                 .edited(false)
+                .status("SENT")
                 .build();
 
         Message savedMessage = messageRepository.save(newMessage);
+        savedMessage = markDeliveredIfNeeded(savedMessage);
         Map<String, Object> payload = toClientMessage(savedMessage);
 
         if ("people".equals(type)) {
@@ -637,6 +655,120 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         sendMessage(session, "success", "SEND_CHAT", "Message sent", payload);
+    }
+
+    private Message markDeliveredIfNeeded(Message message) {
+        boolean delivered = false;
+
+        if ("people".equals(message.getType())) {
+            delivered = isUserOnline(message.getReceiver());
+        } else if ("room".equals(message.getType())) {
+            delivered = roomMemberRepository.findByRoomName(message.getReceiver())
+                    .stream()
+                    .anyMatch(member ->
+                            !message.getSender().equals(member.getUsername())
+                                    && isUserOnline(member.getUsername())
+                    );
+        }
+
+        if (delivered) {
+            message.setStatus("DELIVERED");
+            message.setDeliveredAt(LocalDateTime.now());
+            return messageRepository.save(message);
+        }
+
+        return message;
+    }
+
+    private boolean isUserOnline(String username) {
+        WebSocketSession session = userSessions.get(username);
+        return session != null && session.isOpen();
+    }
+
+    private void handleMarkRead(WebSocketSession session, Map<String, Object> data) throws Exception {
+        String reader = getUsernameFromSession(session);
+        Long messageId = readLong(data, "id", "messageId");
+
+        if (reader == null || messageId == null) {
+            sendMessage(session, "error", "MARK_READ", "Invalid read receipt request", null);
+            return;
+        }
+
+        Optional<Message> messageOptional = messageRepository.findById(messageId);
+
+        if (messageOptional.isEmpty()) {
+            sendMessage(session, "error", "MARK_READ", "Message not found", null);
+            return;
+        }
+
+        Message chatMessage = messageOptional.get();
+
+        if (!canAccessMessage(chatMessage, reader) || reader.equals(chatMessage.getSender())) {
+            sendMessage(session, "error", "MARK_READ", "Cannot mark this message as read", null);
+            return;
+        }
+
+        chatMessage.setStatus("READ");
+        chatMessage.setReadAt(LocalDateTime.now());
+
+        if (chatMessage.getDeliveredAt() == null) {
+            chatMessage.setDeliveredAt(chatMessage.getReadAt());
+        }
+
+        Message savedMessage = messageRepository.save(chatMessage);
+        Map<String, Object> payload = toClientMessage(savedMessage);
+
+        sendRealtimeToUser(savedMessage.getSender(), "MESSAGE_STATUS", "Message read", payload);
+        sendMessage(session, "success", "MARK_READ", "Message read", payload);
+    }
+
+    private void handleTyping(
+            WebSocketSession session,
+            String event,
+            Map<String, Object> data
+    ) throws Exception {
+        String sender = getUsernameFromSession(session);
+        String type = normalizeChatType(data != null ? data.get("type") : null);
+        String to = readString(data, "to", "receiver", "name");
+
+        if (sender == null || to == null) {
+            sendMessage(session, "error", event, "Invalid typing event", null);
+            return;
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", type);
+        payload.put("from", sender);
+        payload.put("name", sender);
+        payload.put("to", to);
+        payload.put("typing", "TYPING".equals(event));
+
+        if ("room".equals(type)) {
+            if (!roomMemberRepository.existsByRoomNameAndUsername(to, sender)) {
+                sendMessage(session, "error", event, "You are not a member of this room", null);
+                return;
+            }
+
+            for (RoomMember member : roomMemberRepository.findByRoomName(to)) {
+                if (!sender.equals(member.getUsername())) {
+                    sendRealtimeToUser(member.getUsername(), event, "Typing updated", payload);
+                }
+            }
+        } else {
+            sendRealtimeToUser(to, event, "Typing updated", payload);
+        }
+    }
+
+    private boolean canAccessMessage(Message message, String username) {
+        if ("people".equals(message.getType())) {
+            return username.equals(message.getSender()) || username.equals(message.getReceiver());
+        }
+
+        if ("room".equals(message.getType())) {
+            return roomMemberRepository.existsByRoomNameAndUsername(message.getReceiver(), username);
+        }
+
+        return false;
     }
 
     // =========================================================
@@ -911,23 +1043,29 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         int page = extractPage(data);
+        int size = extractPageSize(data);
 
-        List<Map<String, Object>> chatMessages = messageRepository
+        List<Map<String, Object>> rawMessages = messageRepository
                 .findPeopleMessages(
                         username,
                         to,
-                        org.springframework.data.domain.PageRequest.of(page - 1, 30)
+                        org.springframework.data.domain.PageRequest.of(page - 1, size + 1)
                 )
                 .stream()
                 .map(this::toClientMessage)
                 .toList();
+        boolean hasMore = rawMessages.size() > size;
+        List<Map<String, Object>> chatMessages = hasMore
+                ? rawMessages.subList(0, size)
+                : rawMessages;
+        Map<String, Object> responseData = buildPagedMessages(chatMessages, page, size, hasMore);
 
         sendMessage(
                 session,
                 "success",
                 "GET_PEOPLE_CHAT_MES",
                 "Messages retrieved",
-                chatMessages
+                responseData
         );
     }
 
@@ -1153,18 +1291,24 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         int page = extractPage(data);
+        int size = extractPageSize(data);
 
-        List<Map<String, Object>> chatMessages = messageRepository
+        List<Map<String, Object>> rawMessages = messageRepository
                 .findRoomMessages(
                         roomName,
-                        org.springframework.data.domain.PageRequest.of(page - 1, 30)
+                        org.springframework.data.domain.PageRequest.of(page - 1, size + 1)
                 )
                 .stream()
                 .map(this::toClientMessage)
                 .toList();
+        boolean hasMore = rawMessages.size() > size;
+        List<Map<String, Object>> chatMessages = hasMore
+                ? rawMessages.subList(0, size)
+                : rawMessages;
 
         Map<String, Object> responseData = buildRoomData(roomName);
         responseData.put("chatData", chatMessages);
+        responseData.putAll(buildPagedMessages(chatMessages, page, size, hasMore));
 
         sendMessage(
                 session,
@@ -1369,6 +1513,37 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         return Math.max(page, 1);
     }
 
+    private int extractPageSize(Map<String, Object> data) {
+        Object sizeObject = data != null ? data.get("size") : null;
+        int size = 30;
+
+        if (sizeObject instanceof Number number) {
+            size = number.intValue();
+        } else if (sizeObject instanceof String text) {
+            try {
+                size = Integer.parseInt(text);
+            } catch (NumberFormatException ignored) {
+                size = 30;
+            }
+        }
+
+        return Math.min(Math.max(size, 1), 100);
+    }
+
+    private Map<String, Object> buildPagedMessages(
+            List<Map<String, Object>> messages,
+            int page,
+            int size,
+            boolean hasMore
+    ) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("messages", messages);
+        response.put("page", page);
+        response.put("size", size);
+        response.put("hasMore", hasMore);
+        return response;
+    }
+
     private Map<String, Object> buildRoomData(String roomName) {
         List<String> userList = roomMemberRepository.findByRoomName(roomName)
                 .stream()
@@ -1411,9 +1586,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         dto.put("createdAt", createdAt);
         dto.put("recalled", recalled);
         dto.put("edited", edited);
-        dto.put("status", recalled ? "recalled" : "sent");
+        dto.put("status", recalled ? "recalled" : normalizeMessageStatus(message.getStatus()));
+        dto.put("deliveredAt", message.getDeliveredAt() != null ? message.getDeliveredAt().toString() : null);
+        dto.put("readAt", message.getReadAt() != null ? message.getReadAt().toString() : null);
 
         return dto;
+    }
+
+    private String normalizeMessageStatus(String status) {
+        if (status == null || status.isBlank()) {
+            return "sent";
+        }
+
+        return status.toLowerCase();
     }
 
     private void sendRealtimeToUser(

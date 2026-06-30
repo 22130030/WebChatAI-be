@@ -28,7 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-
+import com.appchat.backend.repository.MessageReactionRepository;
 @Component
 @RequiredArgsConstructor
 public class ChatWebSocketHandler extends TextWebSocketHandler {
@@ -42,7 +42,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final GroupThemeRepository groupThemeRepository;
     private final JwtUtil jwtUtil;
     private final PasswordEncoder passwordEncoder;
-
+    private final MessageReactionRepository messageReactionRepository;
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> userSessions = new ConcurrentHashMap<>();
 
@@ -220,11 +220,87 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             case "DELETE_PENDING_CONVERSATION":
                 handleDeleteContactRequest(session, data);
                 break;
+            case "REACT_MESSAGE":
+                handleReactMessage(session, data);
+                break;
 
             default:
                 sendMessage(session, "error", event, "Event không được hỗ trợ", null);
                 break;
         }
+    }
+
+
+    private void handleReactMessage(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String username = getUsernameFromSession(session);
+        Long messageId = readLong(data, "messageId", "id");
+        String reaction = readString(data, "reaction", "emoji");
+
+        if ("REMOVE".equalsIgnoreCase(reaction)) {
+            reaction = null;
+        }
+
+        if (username == null) {
+            sendMessage(session, "error", "REACT_MESSAGE", "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (messageId == null) {
+            sendMessage(session, "error", "REACT_MESSAGE", "Không xác định được tin nhắn", null);
+            return;
+        }
+
+        Optional<Message> messageOptional = messageRepository.findById(messageId);
+
+        if (messageOptional.isEmpty()) {
+            sendMessage(session, "error", "REACT_MESSAGE", "Tin nhắn không tồn tại", null);
+            return;
+        }
+
+        Message chatMessage = messageOptional.get();
+
+        if (!canAccessMessage(chatMessage, username)) {
+            sendMessage(session, "error", "REACT_MESSAGE", "Bạn không có quyền thả cảm xúc tin nhắn này", null);
+            return;
+        }
+
+        if (reaction == null || reaction.isBlank() || "REMOVE".equalsIgnoreCase(reaction)) {
+            messageReactionRepository
+                    .findByMessageIdAndUsername(messageId, username)
+                    .ifPresent(messageReactionRepository::delete);
+        } else {
+            MessageReaction messageReaction = messageReactionRepository
+                    .findByMessageIdAndUsername(messageId, username)
+                    .orElseGet(() -> MessageReaction.builder()
+                            .messageId(messageId)
+                            .username(username)
+                            .build());
+
+            messageReaction.setReaction(reaction);
+            messageReactionRepository.save(messageReaction);
+        }
+
+        Map<String, Object> payload = toClientMessage(chatMessage);
+
+        sendMessageToParticipantsExceptRequester(
+                chatMessage,
+                username,
+                "REACT_MESSAGE",
+                "Đã cập nhật cảm xúc tin nhắn",
+                payload
+        );
+
+        sendMessage(
+                session,
+                "success",
+                "REACT_MESSAGE",
+                "Đã cập nhật cảm xúc tin nhắn",
+                payload
+        );
     }
 
     private void handleSendContactRequest(
@@ -1797,7 +1873,18 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         dto.put("status", recalled ? "recalled" : normalizeMessageStatus(message.getStatus()));
         dto.put("deliveredAt", message.getDeliveredAt() != null ? message.getDeliveredAt().toString() : null);
         dto.put("readAt", message.getReadAt() != null ? message.getReadAt().toString() : null);
+        List<Map<String, Object>> reactions = messageReactionRepository
+                .findByMessageId(message.getId())
+                .stream()
+                .map(reaction -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("username", reaction.getUsername());
+                    item.put("reaction", reaction.getReaction());
+                    return item;
+                })
+                .toList();
 
+        dto.put("reactions", reactions);
         return dto;
     }
 

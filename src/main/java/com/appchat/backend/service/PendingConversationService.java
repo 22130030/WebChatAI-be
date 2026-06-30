@@ -15,32 +15,61 @@ public class PendingConversationService {
     private final PendingConversationRepository repository;
 
     public PendingConversation createRequest(String from, String to) {
-        Optional<PendingConversation> existing = repository.findByFromUsernameAndToUsername(from, to);
+        if (from == null || to == null || from.equals(to)) {
+            throw new IllegalArgumentException("Người gửi hoặc người nhận không hợp lệ");
+        }
+
+        Optional<PendingConversation> existing = repository.findBetweenUsers(from, to);
+
         if (existing.isPresent()) {
             PendingConversation pc = existing.get();
+
+            if ("ACCEPTED".equals(pc.getStatus())) {
+                return pc;
+            }
+
+            pc.setFromUsername(from);
+            pc.setToUsername(to);
             pc.setStatus("PENDING");
+
             return repository.save(pc);
         }
+
         PendingConversation pc = PendingConversation.builder()
                 .fromUsername(from)
                 .toUsername(to)
                 .status("PENDING")
                 .build();
+
         return repository.save(pc);
     }
 
-    public List<PendingConversation> getIncomingRequests(String toUsername) {
-        return repository.findByToUsernameAndStatus(toUsername, "PENDING");
+    public List<PendingConversation> getIncomingRequests(String username) {
+        return repository.findByToUsernameAndStatus(username, "PENDING");
+    }
+
+    public List<PendingConversation> getOutgoingRequests(String username) {
+        return repository.findByFromUsernameAndStatus(username, "PENDING");
+    }
+
+    public List<PendingConversation> getAcceptedConversations(String username) {
+        return repository.findAcceptedConversations(username);
     }
 
     public void acceptRequest(String from, String to) {
-        repository.findByFromUsernameAndToUsername(from, to).ifPresent(pc -> {
-            pc.setStatus("ACCEPTED");
-            repository.save(pc);
-        });
+        repository.findByFromUsernameAndToUsername(from, to)
+                .ifPresent(pc -> {
+                    pc.setStatus("ACCEPTED");
+                    repository.save(pc);
+                });
     }
 
     public void deleteRequest(String from, String to) {
-        repository.findByFromUsernameAndToUsername(from, to).ifPresent(repository::delete);
+        repository.findBetweenUsers(from, to)
+                .ifPresent(repository::delete);
+    }
+
+    public boolean isAccepted(String user1, String user2) {
+        return repository.existsAcceptedBetween(user1, user2);
     }
 }

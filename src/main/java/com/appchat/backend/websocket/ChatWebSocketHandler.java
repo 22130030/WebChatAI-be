@@ -751,12 +751,25 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
                 userData.put("name", user.getUsername());
                 userData.put("type", 0);
+                Optional<Message> lastMessage =
+                        messageRepository.findTopByTypeAndSenderAndReceiverOrTypeAndSenderAndReceiverOrderByCreatedAtDesc(
+                                "people", username, friendUsername,
+                                "people", friendUsername, username
+                        );
+
                 userData.put(
                         "actionTime",
-                        conversation.getUpdatedAt() != null
-                                ? conversation.getUpdatedAt().toString()
-                                : LocalDateTime.now().toString()
+                        lastMessage
+                                .map(message -> message.getCreatedAt().toString())
+                                .orElse(conversation.getUpdatedAt() != null
+                                        ? conversation.getUpdatedAt().toString()
+                                        : LocalDateTime.MIN.toString())
                 );
+
+                lastMessage.ifPresent(message -> {
+                    userData.put("lastMessage", message.getContent());
+                    userData.put("lastSender", message.getSender());
+                });
 
                 responseList.add(userData);
             });
@@ -765,12 +778,32 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         for (RoomMember roomMember : roomMemberRepository.findByUsername(username)) {
             Map<String, Object> roomData = new LinkedHashMap<>();
 
-            roomData.put("name", roomMember.getRoomName());
+            String roomName = roomMember.getRoomName();
+
+            Optional<Message> lastRoomMessage =
+                    messageRepository.findTopByTypeAndReceiverOrderByCreatedAtDesc(
+                            "room",
+                            roomName
+                    );
+
+            roomData.put("name", roomName);
             roomData.put("type", 1);
-            roomData.put("actionTime", LocalDateTime.now().toString());
+
+            roomData.put(
+                    "actionTime",
+                    lastRoomMessage
+                            .map(message -> message.getCreatedAt().toString())
+                            .orElse(LocalDateTime.MIN.toString())
+            );
+
+            lastRoomMessage.ifPresent(message -> {
+                roomData.put("lastMessage", message.getContent());
+                roomData.put("lastSender", message.getSender());
+            });
 
             responseList.add(roomData);
         }
+
 
         sendMessage(
                 session,
@@ -1294,7 +1327,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     ) throws Exception {
 
         if ("people".equals(chatMessage.getType())) {
-            sendRealtimeToUser(chatMessage.getReceiver(), event, message, payload);
+            String targetUser = requester.equals(chatMessage.getSender())
+                    ? chatMessage.getReceiver()
+                    : chatMessage.getSender();
+
+            sendRealtimeToUser(targetUser, event, message, payload);
             return;
         }
 

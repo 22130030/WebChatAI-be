@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface MessageRepository extends JpaRepository<Message, Long> {
@@ -89,5 +90,33 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
     @Transactional
     @Query(value = "DELETE FROM messages WHERE type = 'room' AND receiver = :roomName", nativeQuery = true)
     int deleteRoomMessages(@Param("roomName") String roomName);
+    Optional<Message> findTopByTypeAndSenderAndReceiverOrTypeAndSenderAndReceiverOrderByCreatedAtDesc(
+            String type1,
+            String sender1,
+            String receiver1,
+            String type2,
+            String sender2,
+            String receiver2
+    );
+
+    Optional<Message> findTopByTypeAndReceiverOrderByCreatedAtDesc(
+            String type,
+            String receiver
+    );
+    @Query("""
+    SELECT m FROM Message m
+    WHERE m.type = 'people'
+      AND (
+        (m.sender = :user1 AND m.receiver = :user2)
+        OR
+        (m.sender = :user2 AND m.receiver = :user1)
+      )
+    ORDER BY m.createdAt DESC
+""")
+    List<Message> findLastPeopleMessage(
+            @Param("user1") String user1,
+            @Param("user2") String user2,
+            Pageable pageable
+    );
 
 }

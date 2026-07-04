@@ -69,6 +69,18 @@ public class PendingConversationService {
                 .ifPresent(repository::delete);
     }
 
+    public void removeContact(String currentUser, String otherUser) {
+        PendingConversation pc = repository.findBetweenUsers(currentUser, otherUser)
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy liên hệ"));
+
+        if (!"ACCEPTED".equals(pc.getStatus())) {
+            throw new RuntimeException("Hai người chưa là liên hệ");
+        }
+
+        pc.setStatus("REMOVED");
+        repository.save(pc);
+    }
+
     public boolean isAccepted(String user1, String user2) {
         return repository.existsAcceptedBetween(user1, user2);
     }

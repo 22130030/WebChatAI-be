@@ -120,4 +120,30 @@ public class PendingConversationController {
             throw new AccessDeniedException("Unauthorized");
         }
     }
+
+    @PostMapping("/remove-contact")
+    public ApiResponse<Void> removeContact(
+            @RequestBody PendingRequest req,
+            Authentication authentication
+    ) {
+        if (
+                authentication == null ||
+                        !authentication.isAuthenticated() ||
+                        (
+                                !authentication.getName().equals(req.getFromUsername()) &&
+                                        !authentication.getName().equals(req.getToUsername())
+                        )
+        ) {
+            throw new AccessDeniedException("Unauthorized");
+        }
+
+        String currentUser = authentication.getName();
+        String otherUser = currentUser.equals(req.getFromUsername())
+                ? req.getToUsername()
+                : req.getFromUsername();
+
+        service.removeContact(currentUser, otherUser);
+
+        return new ApiResponse<>("REMOVE_CONTACT", null);
+    }
 }

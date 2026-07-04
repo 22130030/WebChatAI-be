@@ -223,6 +223,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             case "REACT_MESSAGE":
                 handleReactMessage(session, data);
                 break;
+            case "REMOVE_CONTACT":
+                handleRemoveContact(session, data);
+                break;
 
             default:
                 sendMessage(session, "error", event, "Event không được hỗ trợ", null);
@@ -230,6 +233,49 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+
+    private void handleRemoveContact(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String currentUser = getUsernameFromSession(session);
+        String otherUser = readString(data, "user", "username", "name", "to", "toUsername");
+
+        if (currentUser == null) {
+            sendMessage(session, "error", "REMOVE_CONTACT", "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (otherUser == null || currentUser.equals(otherUser)) {
+            sendMessage(session, "error", "REMOVE_CONTACT", "Username không hợp lệ", null);
+            return;
+        }
+
+        Optional<PendingConversation> optional =
+                pendingConversationRepository.findBetweenUsers(currentUser, otherUser);
+
+        if (optional.isEmpty() || !"ACCEPTED".equals(optional.get().getStatus())) {
+            sendMessage(session, "error", "REMOVE_CONTACT", "Không tìm thấy liên hệ", null);
+            return;
+        }
+
+        PendingConversation pc = optional.get();
+        pc.setStatus("REMOVED");
+        pendingConversationRepository.save(pc);
+
+        Map<String, Object> payload = toClientPendingConversation(pc);
+
+        sendMessage(session, "success", "REMOVE_CONTACT", "Đã xóa liên hệ", payload);
+        sendRealtimeToUser(otherUser, "CONTACT_REMOVED", currentUser + " đã xóa liên hệ", payload);
+
+        handleGetUserList(session);
+
+        WebSocketSession otherSession = userSessions.get(otherUser);
+        if (otherSession != null && otherSession.isOpen()) {
+            handleGetUserList(otherSession);
+        }
+    }
 
     private void handleReactMessage(
             WebSocketSession session,

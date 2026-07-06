@@ -23,6 +23,9 @@ public class Room {
     @Column(nullable = false, length = 20)
     private String type;
 
+    @Column(name = "owner_username", nullable = false)
+    private String ownerUsername;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

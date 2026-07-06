@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface RoomMemberRepository extends JpaRepository<RoomMember, RoomMemberId> {
@@ -26,5 +27,16 @@ public interface RoomMemberRepository extends JpaRepository<RoomMember, RoomMemb
     @Transactional
     @Query(value = "DELETE FROM room_members WHERE room_name = :roomName AND username = :username", nativeQuery = true)
     int deleteMemberFromRoom(@Param("roomName") String roomName, @Param("username") String username);
+
+    Optional<RoomMember> findByRoomNameAndUsername(String roomName, String username);
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Transactional
+    @Query(value = "UPDATE room_members SET role = :role WHERE room_name = :roomName AND username = :username", nativeQuery = true)
+    int updateRole(
+            @Param("roomName") String roomName,
+            @Param("username") String username,
+            @Param("role") String role
+    );
 
 }

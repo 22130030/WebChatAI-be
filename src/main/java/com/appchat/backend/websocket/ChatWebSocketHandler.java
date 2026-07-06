@@ -221,6 +221,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             case "GET_ROOM_MEMBERS":
                 handleGetRoomMembers(session, data);
                 break;
+            case "SET_ROOM_DEPUTY":
+            case "PROMOTE_ROOM_DEPUTY":
+                handleSetRoomDeputy(session, data);
+                break;
+
+            case "REMOVE_ROOM_DEPUTY":
+            case "DEMOTE_ROOM_DEPUTY":
+                handleRemoveRoomDeputy(session, data);
+                break;
+
+            case "REMOVE_ROOM_MEMBER":
+            case "KICK_ROOM_MEMBER":
+                handleRemoveRoomMember(session, data);
+                break;
 
             case "GET_ROOM_CHAT_MES":
                 handleGetRoomChatMes(session, data);
@@ -862,9 +876,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         for (RoomMember roomMember : roomMemberRepository.findByUsername(username)) {
-            Map<String, Object> roomData = new LinkedHashMap<>();
-
             String roomName = roomMember.getRoomName();
+
+            if (roomRepository.findByName(roomName).isEmpty()) {
+                continue;
+            }
+
+            Map<String, Object> roomData = buildRoomData(roomName);
+            roomData.put("currentUserRole", normalizeRoomRole(roomMember.getRole()));
 
             Optional<Message> lastRoomMessage =
                     messageRepository.findTopByTypeAndReceiverOrderByCreatedAtDesc(
@@ -1857,10 +1876,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        if (roomName == null) {
+        if (roomName == null || roomName.isBlank()) {
             sendMessage(session, "error", "CREATE_ROOM", "Tên nhóm không được để trống", null);
             return;
         }
+
+        roomName = roomName.trim();
 
         if (roomRepository.findByName(roomName).isPresent()) {
             sendMessage(session, "error", "CREATE_ROOM", "Tên nhóm đã tồn tại", null);
@@ -1870,6 +1891,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         Room room = Room.builder()
                 .name(roomName)
                 .type("GROUP")
+                .ownerUsername(creator)
                 .build();
 
         roomRepository.save(room);
@@ -1877,14 +1899,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         RoomMember creatorMember = RoomMember.builder()
                 .roomName(roomName)
                 .username(creator)
+                .role(RoomMember.ROLE_OWNER)
                 .build();
 
         roomMemberRepository.save(creatorMember);
 
         Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("currentUserRole", RoomMember.ROLE_OWNER);
 
         sendMessage(session, "success", "CREATE_ROOM", "Tạo nhóm thành công", roomData);
-
         handleGetUserList(session);
     }
 
@@ -1906,17 +1929,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        if (!roomMemberRepository.existsByRoomNameAndUsername(roomName, username)) {
+        Optional<RoomMember> currentMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, username);
+
+        if (currentMember.isEmpty()) {
             sendMessage(session, "error", "JOIN_ROOM", "Bạn chưa được thêm vào nhóm này", null);
             return;
         }
+
+        Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("currentUserRole", normalizeRoomRole(currentMember.get().getRole()));
 
         sendMessage(
                 session,
                 "success",
                 "JOIN_ROOM",
                 "Joined room successfully",
-                buildRoomData(roomName)
+                roomData
         );
     }
 
@@ -1927,7 +1956,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         String requester = getUsernameFromSession(session);
         String roomName = readString(data, "name", "roomName", "room");
-        String newUsername = readString(data, "user", "username", "member");
+        String newUsername = readString(data, "user", "username", "member", "targetUsername");
 
         if (requester == null) {
             sendMessage(session, "error", "ADD_USER_TO_ROOM", "Bạn cần đăng nhập trước", null);
@@ -1935,13 +1964,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         if (roomName == null || newUsername == null) {
-            sendMessage(
-                    session,
-                    "error",
-                    "ADD_USER_TO_ROOM",
-                    "Tên nhóm hoặc username không hợp lệ",
-                    null
-            );
+            sendMessage(session, "error", "ADD_USER_TO_ROOM", "Tên nhóm hoặc username không hợp lệ", null);
             return;
         }
 
@@ -1950,8 +1973,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        if (!roomMemberRepository.existsByRoomNameAndUsername(roomName, requester)) {
+        Optional<RoomMember> requesterMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, requester);
+
+        if (requesterMember.isEmpty()) {
             sendMessage(session, "error", "ADD_USER_TO_ROOM", "Bạn không thuộc nhóm này", null);
+            return;
+        }
+
+        if (requester.equals(newUsername)) {
+            sendMessage(session, "error", "ADD_USER_TO_ROOM", "Bạn đã có trong nhóm", null);
             return;
         }
 
@@ -1968,34 +1999,33 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         RoomMember newMember = RoomMember.builder()
                 .roomName(roomName)
                 .username(newUsername)
+                .role(RoomMember.ROLE_MEMBER)
                 .build();
 
         roomMemberRepository.save(newMember);
 
         Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("addedUser", newUsername);
+        roomData.put("actor", requester);
 
-        sendMessage(
-                session,
-                "success",
-                "ADD_USER_TO_ROOM",
-                "Thêm thành viên thành công",
-                roomData
-        );
+        sendMessage(session, "success", "ADD_USER_TO_ROOM", "Thêm thành viên thành công", roomData);
 
-        handleGetUserList(session);
+        for (RoomMember member : roomMemberRepository.findByRoomName(roomName)) {
+            if (member.getUsername().equals(requester)) {
+                refreshUserListForOnlineUser(member.getUsername());
+                continue;
+            }
 
-        WebSocketSession addedUserSession = userSessions.get(newUsername);
-
-        if (addedUserSession != null && addedUserSession.isOpen()) {
-            sendMessage(
-                    addedUserSession,
-                    "success",
-                    "ADDED_TO_ROOM",
-                    "Bạn đã được thêm vào nhóm " + roomName,
+            sendRealtimeToUser(
+                    member.getUsername(),
+                    member.getUsername().equals(newUsername) ? "ADDED_TO_ROOM" : "ROOM_MEMBER_ADDED",
+                    member.getUsername().equals(newUsername)
+                            ? "Bạn đã được thêm vào nhóm " + roomName
+                            : newUsername + " đã được thêm vào nhóm",
                     roomData
             );
 
-            handleGetUserList(addedUserSession);
+            refreshUserListForOnlineUser(member.getUsername());
         }
     }
 
@@ -2008,28 +2038,204 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String roomName = readString(data, "name", "roomName", "room");
 
         if (requester == null || roomName == null) {
-            sendMessage(
-                    session,
-                    "error",
-                    "GET_ROOM_MEMBERS",
-                    "Thông tin nhóm không hợp lệ",
-                    null
-            );
+            sendMessage(session, "error", "GET_ROOM_MEMBERS", "Thông tin nhóm không hợp lệ", null);
             return;
         }
 
-        if (!roomMemberRepository.existsByRoomNameAndUsername(roomName, requester)) {
+        Optional<RoomMember> requesterMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, requester);
+
+        if (requesterMember.isEmpty()) {
             sendMessage(session, "error", "GET_ROOM_MEMBERS", "Bạn không thuộc nhóm này", null);
             return;
         }
+
+        Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("currentUserRole", normalizeRoomRole(requesterMember.get().getRole()));
 
         sendMessage(
                 session,
                 "success",
                 "GET_ROOM_MEMBERS",
                 "Lấy danh sách thành viên thành công",
-                buildRoomData(roomName)
+                roomData
         );
+    }
+
+    private void handleSetRoomDeputy(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String requester = getUsernameFromSession(session);
+        String roomName = readString(data, "name", "roomName", "room");
+        String targetUsername = readString(data, "user", "username", "member", "targetUsername");
+
+        if (requester == null) {
+            sendMessage(session, "error", "SET_ROOM_DEPUTY", "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (roomName == null || targetUsername == null) {
+            sendMessage(session, "error", "SET_ROOM_DEPUTY", "Thông tin nhóm hoặc thành viên không hợp lệ", null);
+            return;
+        }
+
+        Optional<RoomMember> requesterMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, requester);
+        Optional<RoomMember> targetMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, targetUsername);
+
+        if (requesterMember.isEmpty() || targetMember.isEmpty()) {
+            sendMessage(session, "error", "SET_ROOM_DEPUTY", "Thành viên không tồn tại trong nhóm", null);
+            return;
+        }
+
+        if (!isRoomOwner(requesterMember.get())) {
+            sendMessage(session, "error", "SET_ROOM_DEPUTY", "Chỉ trưởng nhóm mới được cấp phó nhóm", null);
+            return;
+        }
+
+        if (isRoomOwner(targetMember.get())) {
+            sendMessage(session, "error", "SET_ROOM_DEPUTY", "Không thể cấp phó cho trưởng nhóm", null);
+            return;
+        }
+
+        roomMemberRepository.updateRole(roomName, targetUsername, RoomMember.ROLE_DEPUTY);
+
+        Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("targetUser", targetUsername);
+        roomData.put("targetRole", RoomMember.ROLE_DEPUTY);
+        roomData.put("actor", requester);
+
+        sendMessage(session, "success", "SET_ROOM_DEPUTY", "Đã cấp phó nhóm", roomData);
+        broadcastRoomData(roomName, requester, "ROOM_ROLE_UPDATED", "Vai trò thành viên đã được cập nhật", roomData);
+        refreshUserListsInRoom(roomName);
+    }
+
+    private void handleRemoveRoomDeputy(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String requester = getUsernameFromSession(session);
+        String roomName = readString(data, "name", "roomName", "room");
+        String targetUsername = readString(data, "user", "username", "member", "targetUsername");
+
+        if (requester == null) {
+            sendMessage(session, "error", "REMOVE_ROOM_DEPUTY", "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (roomName == null || targetUsername == null) {
+            sendMessage(session, "error", "REMOVE_ROOM_DEPUTY", "Thông tin nhóm hoặc thành viên không hợp lệ", null);
+            return;
+        }
+
+        Optional<RoomMember> requesterMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, requester);
+        Optional<RoomMember> targetMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, targetUsername);
+
+        if (requesterMember.isEmpty() || targetMember.isEmpty()) {
+            sendMessage(session, "error", "REMOVE_ROOM_DEPUTY", "Thành viên không tồn tại trong nhóm", null);
+            return;
+        }
+
+        if (!isRoomOwner(requesterMember.get())) {
+            sendMessage(session, "error", "REMOVE_ROOM_DEPUTY", "Chỉ trưởng nhóm mới được hủy phó nhóm", null);
+            return;
+        }
+
+        if (isRoomOwner(targetMember.get())) {
+            sendMessage(session, "error", "REMOVE_ROOM_DEPUTY", "Không thể hủy vai trò trưởng nhóm", null);
+            return;
+        }
+
+        roomMemberRepository.updateRole(roomName, targetUsername, RoomMember.ROLE_MEMBER);
+
+        Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("targetUser", targetUsername);
+        roomData.put("targetRole", RoomMember.ROLE_MEMBER);
+        roomData.put("actor", requester);
+
+        sendMessage(session, "success", "REMOVE_ROOM_DEPUTY", "Đã hủy phó nhóm", roomData);
+        broadcastRoomData(roomName, requester, "ROOM_ROLE_UPDATED", "Vai trò thành viên đã được cập nhật", roomData);
+        refreshUserListsInRoom(roomName);
+    }
+
+    private void handleRemoveRoomMember(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String requester = getUsernameFromSession(session);
+        String roomName = readString(data, "name", "roomName", "room");
+        String targetUsername = readString(data, "user", "username", "member", "targetUsername");
+
+        if (requester == null) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (roomName == null || targetUsername == null) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Thông tin nhóm hoặc thành viên không hợp lệ", null);
+            return;
+        }
+
+        Optional<RoomMember> requesterMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, requester);
+        Optional<RoomMember> targetMember =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, targetUsername);
+
+        if (requesterMember.isEmpty()) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Bạn không thuộc nhóm này", null);
+            return;
+        }
+
+        if (targetMember.isEmpty()) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Thành viên cần xóa không tồn tại trong nhóm", null);
+            return;
+        }
+
+        if (!isRoomManager(requesterMember.get())) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Chỉ trưởng nhóm hoặc phó nhóm mới được xóa thành viên", null);
+            return;
+        }
+
+        if (requester.equals(targetUsername)) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Muốn tự rời nhóm hãy dùng chức năng Rời khỏi phòng chat", null);
+            return;
+        }
+
+        if (isRoomOwner(targetMember.get())) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Không thể xóa trưởng nhóm", null);
+            return;
+        }
+
+        if (isRoomDeputy(targetMember.get()) && !isRoomOwner(requesterMember.get())) {
+            sendMessage(session, "error", "REMOVE_ROOM_MEMBER", "Phó nhóm không thể xóa phó nhóm khác", null);
+            return;
+        }
+
+        roomMemberRepository.deleteMemberFromRoom(roomName, targetUsername);
+
+        Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("removedUser", targetUsername);
+        roomData.put("actor", requester);
+
+        sendMessage(session, "success", "REMOVE_ROOM_MEMBER", "Đã xóa thành viên khỏi nhóm", roomData);
+
+        sendRealtimeToUser(
+                targetUsername,
+                "ROOM_MEMBER_REMOVED_FROM_ROOM",
+                "Bạn đã bị xóa khỏi nhóm " + roomName,
+                roomData
+        );
+        refreshUserListForOnlineUser(targetUsername);
+
+        broadcastRoomData(roomName, requester, "ROOM_MEMBER_REMOVED", targetUsername + " đã bị xóa khỏi nhóm", roomData);
+        refreshUserListsInRoom(roomName);
     }
 
     private void handleGetRoomChatMes(
@@ -2191,16 +2397,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         String requester = getUsernameFromSession(session);
         String roomName = readString(data, "name", "roomName", "room");
+        String newOwnerUsername = readString(data, "newOwner", "newOwnerUsername", "ownerUsername");
 
         if (requester == null) {
             sendMessage(session, "error", "LEAVE_ROOM", "Bạn cần đăng nhập trước", null);
             return;
         }
 
-        if (roomName == null) {
+        if (roomName == null || roomName.isBlank()) {
             sendMessage(session, "error", "LEAVE_ROOM", "Tên nhóm không hợp lệ", null);
             return;
         }
+
+        roomName = roomName.trim();
 
         var roomOptional = roomRepository.findByName(roomName);
 
@@ -2209,23 +2418,36 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        if (!roomMemberRepository.existsByRoomNameAndUsername(roomName, requester)) {
+        Optional<RoomMember> requesterMemberOptional =
+                roomMemberRepository.findByRoomNameAndUsername(roomName, requester);
+
+        if (requesterMemberOptional.isEmpty()) {
             sendMessage(session, "error", "LEAVE_ROOM", "Bạn không thuộc nhóm này", null);
             return;
         }
 
-        roomMemberRepository.deleteMemberFromRoom(roomName, requester);
+        Room room = roomOptional.get();
+        RoomMember requesterMember = requesterMemberOptional.get();
 
-        List<RoomMember> remainingMembers = roomMemberRepository.findByRoomName(roomName);
+        boolean requesterIsOwner = isRoomOwner(requesterMember)
+                || requester.equals(room.getOwnerUsername());
+
+        List<RoomMember> membersBeforeLeave = roomMemberRepository.findByRoomName(roomName);
+
+        List<RoomMember> remainingBeforeLeave = membersBeforeLeave
+                .stream()
+                .filter(member -> !requester.equals(member.getUsername()))
+                .toList();
 
         Map<String, Object> leaveData = new LinkedHashMap<>();
         leaveData.put("name", roomName);
         leaveData.put("leftUser", requester);
 
-        if (remainingMembers.isEmpty()) {
+        if (remainingBeforeLeave.isEmpty()) {
+            roomMemberRepository.deleteMemberFromRoom(roomName, requester);
             groupThemeRepository.deleteByGroupName(roomName);
             messageRepository.deleteRoomMessages(roomName);
-            roomRepository.delete(roomOptional.get());
+            roomRepository.delete(room);
 
             leaveData.put("deleted", true);
 
@@ -2236,28 +2458,73 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     "Bạn đã rời nhóm. Nhóm trống nên đã được xóa.",
                     leaveData
             );
-        } else {
-            leaveData.put("deleted", false);
 
-            sendMessage(
-                    session,
-                    "success",
-                    "LEAVE_ROOM",
-                    "Rời khỏi phòng chat thành công",
-                    leaveData
-            );
+            handleGetUserList(session);
+            return;
+        }
 
-            Map<String, Object> roomData = buildRoomData(roomName);
-            roomData.put("leftUser", requester);
-
-            for (RoomMember member : remainingMembers) {
-                sendRealtimeToUser(
-                        member.getUsername(),
-                        "ROOM_MEMBER_LEFT",
-                        requester + " đã rời khỏi nhóm",
-                        roomData
-                );
+        if (requesterIsOwner) {
+            if (newOwnerUsername == null || newOwnerUsername.isBlank()) {
+                sendMessage(session, "error", "LEAVE_ROOM", "Trưởng nhóm phải chọn người nhận quyền trước khi rời nhóm", null);
+                return;
             }
+
+            newOwnerUsername = newOwnerUsername.trim();
+
+            if (requester.equals(newOwnerUsername)) {
+                sendMessage(session, "error", "LEAVE_ROOM", "Người nhận quyền phải là thành viên khác", null);
+                return;
+            }
+
+            Optional<RoomMember> newOwnerMember =
+                    roomMemberRepository.findByRoomNameAndUsername(roomName, newOwnerUsername);
+
+            if (newOwnerMember.isEmpty()) {
+                sendMessage(session, "error", "LEAVE_ROOM", "Người nhận quyền không thuộc nhóm này", null);
+                return;
+            }
+
+            room.setOwnerUsername(newOwnerUsername);
+            roomRepository.saveAndFlush(room);
+            roomMemberRepository.updateRole(roomName, newOwnerUsername, RoomMember.ROLE_OWNER);
+
+            leaveData.put("newOwner", newOwnerUsername);
+            leaveData.put("newOwnerUsername", newOwnerUsername);
+        }
+
+        roomMemberRepository.deleteMemberFromRoom(roomName, requester);
+
+        List<RoomMember> remainingMembers = roomMemberRepository.findByRoomName(roomName);
+        leaveData.put("deleted", false);
+
+        sendMessage(
+                session,
+                "success",
+                "LEAVE_ROOM",
+                requesterIsOwner
+                        ? "Bạn đã rời nhóm và nhường quyền trưởng nhóm thành công"
+                        : "Rời khỏi phòng chat thành công",
+                leaveData
+        );
+
+        Map<String, Object> roomData = buildRoomData(roomName);
+        roomData.put("leftUser", requester);
+
+        if (requesterIsOwner) {
+            roomData.put("newOwner", newOwnerUsername);
+            roomData.put("newOwnerUsername", newOwnerUsername);
+        }
+
+        for (RoomMember member : remainingMembers) {
+            sendRealtimeToUser(
+                    member.getUsername(),
+                    requesterIsOwner ? "ROOM_OWNER_CHANGED" : "ROOM_MEMBER_LEFT",
+                    requesterIsOwner
+                            ? requester + " đã rời nhóm và nhường quyền trưởng nhóm cho " + newOwnerUsername
+                            : requester + " đã rời khỏi nhóm",
+                    roomData
+            );
+            refreshUserListForOnlineUser(member.getUsername());
         }
 
         handleGetUserList(session);
@@ -2370,9 +2637,82 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     private Map<String, Object> buildRoomData(String roomName) {
-        List<String> userList = roomMemberRepository.findByRoomName(roomName)
+        List<RoomMember> roomMembers = roomMemberRepository.findByRoomName(roomName)
                 .stream()
+                .sorted((left, right) -> {
+                    int roleCompare = Integer.compare(
+                            roleOrder(left.getRole()),
+                            roleOrder(right.getRole())
+                    );
+
+                    if (roleCompare != 0) {
+                        return roleCompare;
+                    }
+
+                    return String.CASE_INSENSITIVE_ORDER.compare(
+                            left.getUsername(),
+                            right.getUsername()
+                    );
+                })
+                .toList();
+
+        Optional<Room> roomOptional = roomRepository.findByName(roomName);
+
+        // Lấy trưởng nhóm theo room_members.role trước.
+        // Nếu rooms.owner_username bị lệch thì vẫn hiển thị đúng theo DB room_members.
+        String ownerUsername = roomMembers
+                .stream()
+                .filter(this::isRoomOwner)
                 .map(RoomMember::getUsername)
+                .findFirst()
+                .orElseGet(() -> roomOptional
+                        .map(Room::getOwnerUsername)
+                        .filter(owner -> owner != null && !owner.isBlank())
+                        .orElse(roomMembers.isEmpty() ? "" : roomMembers.get(0).getUsername())
+                );
+
+        // Đồng bộ lại rooms.owner_username nếu đang bị lệch
+        roomOptional.ifPresent(room -> {
+            if (ownerUsername != null
+                    && !ownerUsername.isBlank()
+                    && !ownerUsername.equals(room.getOwnerUsername())) {
+                room.setOwnerUsername(ownerUsername);
+                roomRepository.save(room);
+            }
+        });
+
+        final String finalOwnerUsername = ownerUsername;
+
+        List<Map<String, Object>> memberPayloads = roomMembers
+                .stream()
+                .map(member -> {
+                    String memberUsername = member.getUsername();
+                    String role = normalizeRoomRole(member.getRole());
+
+                    if (memberUsername.equals(finalOwnerUsername)) {
+                        role = RoomMember.ROLE_OWNER;
+                    } else if (RoomMember.ROLE_OWNER.equals(role)) {
+                        role = RoomMember.ROLE_MEMBER;
+                    }
+
+                    Map<String, Object> memberData = new LinkedHashMap<>();
+
+                    memberData.put("name", memberUsername);
+                    memberData.put("username", memberUsername);
+                    memberData.put("role", role);
+                    memberData.put("own", RoomMember.ROLE_OWNER.equals(role));
+                    memberData.put("isOwner", RoomMember.ROLE_OWNER.equals(role));
+                    memberData.put("isDeputy", RoomMember.ROLE_DEPUTY.equals(role));
+
+                    userRepository.findByUsername(memberUsername).ifPresent(user -> {
+                        memberData.put("displayName", getEffectiveDisplayName(user));
+                        memberData.put("avatar", user.getAvatar());
+                        memberData.put("bio", user.getBio());
+                        memberData.put("status", user.getStatus());
+                    });
+
+                    return memberData;
+                })
                 .toList();
 
         Map<String, Object> roomData = new LinkedHashMap<>();
@@ -2381,8 +2721,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         roomData.put("displayName", roomName);
         roomData.put("avatar", null);
         roomData.put("type", 1);
-        roomData.put("own", userList.isEmpty() ? "" : userList.get(0));
-        roomData.put("userList", userList);
+        roomData.put("own", ownerUsername);
+        roomData.put("ownerUsername", ownerUsername);
+        roomData.put("userList", memberPayloads);
+        roomData.put("members", memberPayloads);
 
         return roomData;
     }
@@ -2450,6 +2792,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         return dto;
     }
 
+
+
     private String normalizeMessageStatus(String status) {
         if (status == null || status.isBlank()) {
             return "sent";
@@ -2479,6 +2823,73 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             handleGetUserList(targetSession);
         }
     }
+
+    private String normalizeRoomRole(String role) {
+        if (role == null || role.isBlank()) {
+            return RoomMember.ROLE_MEMBER;
+        }
+
+        String normalized = role.trim().toUpperCase();
+
+        if (RoomMember.ROLE_OWNER.equals(normalized)
+                || RoomMember.ROLE_DEPUTY.equals(normalized)
+                || RoomMember.ROLE_MEMBER.equals(normalized)) {
+            return normalized;
+        }
+
+        return RoomMember.ROLE_MEMBER;
+    }
+
+    private boolean isRoomOwner(RoomMember member) {
+        return member != null
+                && RoomMember.ROLE_OWNER.equals(normalizeRoomRole(member.getRole()));
+    }
+
+    private boolean isRoomDeputy(RoomMember member) {
+        return member != null
+                && RoomMember.ROLE_DEPUTY.equals(normalizeRoomRole(member.getRole()));
+    }
+
+    private boolean isRoomManager(RoomMember member) {
+        return isRoomOwner(member) || isRoomDeputy(member);
+    }
+
+    private int roleOrder(String role) {
+        String normalized = normalizeRoomRole(role);
+
+        if (RoomMember.ROLE_OWNER.equals(normalized)) {
+            return 0;
+        }
+
+        if (RoomMember.ROLE_DEPUTY.equals(normalized)) {
+            return 1;
+        }
+
+        return 2;
+    }
+
+    private void broadcastRoomData(
+            String roomName,
+            String exceptUsername,
+            String event,
+            String message,
+            Object payload
+    ) throws Exception {
+        for (RoomMember member : roomMemberRepository.findByRoomName(roomName)) {
+            if (exceptUsername != null && exceptUsername.equals(member.getUsername())) {
+                continue;
+            }
+
+            sendRealtimeToUser(member.getUsername(), event, message, payload);
+        }
+    }
+
+    private void refreshUserListsInRoom(String roomName) throws Exception {
+        for (RoomMember member : roomMemberRepository.findByRoomName(roomName)) {
+            refreshUserListForOnlineUser(member.getUsername());
+        }
+    }
+
 
     private void markUserOnline(String username, WebSocketSession session) {
         userSessions.put(username, session);

@@ -23,6 +23,15 @@ public class User {
     @Column(nullable = false)
     private String password;
 
+    @Column(name = "display_name", length = 100)
+    private String displayName;
+
+    @Column(columnDefinition = "TEXT")
+    private String avatar;
+
+    @Column(length = 500)
+    private String bio;
+
     @Builder.Default
     @Column(length = 50)
     private String status = "OFFLINE";

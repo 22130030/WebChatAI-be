@@ -146,6 +146,40 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 handleCheckUserExist(session, data);
                 break;
 
+            case "GET_PROFILE":
+                handleGetProfile(session, data);
+                break;
+
+            case "UPDATE_PROFILE":
+                handleUpdateProfile(session, data);
+                break;
+
+            case "CALL_INVITE":
+                handleCallInvite(session, data);
+                break;
+
+            case "CALL_ACCEPT":
+                handleCallControl(session, data, "CALL_ACCEPTED", "CALL_ACCEPT", "Đã chấp nhận cuộc gọi");
+                break;
+
+            case "CALL_REJECT":
+                handleCallControl(session, data, "CALL_REJECTED", "CALL_REJECT", "Đã từ chối cuộc gọi");
+                break;
+
+            case "CALL_CANCEL":
+                handleCallControl(session, data, "CALL_CANCELED", "CALL_CANCEL", "Đã hủy cuộc gọi");
+                break;
+
+            case "CALL_END":
+                handleCallControl(session, data, "CALL_ENDED", "CALL_END", "Cuộc gọi đã kết thúc");
+                break;
+
+            case "WEBRTC_OFFER":
+            case "WEBRTC_ANSWER":
+            case "WEBRTC_ICE_CANDIDATE":
+                handleWebRtcSignal(session, event, data);
+                break;
+
             case "SEND_CHAT":
                 handleSendChat(session, data);
                 break;
@@ -661,11 +695,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
             String token = jwtUtil.generateToken(username);
 
-            Map<String, String> payload = Map.of(
-                    "token", token,
-                    "RE_LOGIN_CODE", token,
-                    "user", username
-            );
+            Map<String, Object> payload = buildAuthPayload(optionalUser.get(), token);
 
             sendMessage(session, "success", "LOGIN", "Login successful", payload);
         } else {
@@ -718,6 +748,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         User newUser = User.builder()
                 .username(username)
                 .password(passwordEncoder.encode(password))
+                .displayName(username)
                 .status("OFFLINE")
                 .build();
 
@@ -746,13 +777,18 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        var optionalUser = userRepository.findByUsername(username);
+
+        if (optionalUser.isEmpty()) {
+            sendMessage(session, "error", "RE_LOGIN", "Invalid re-login credentials", null);
+            return;
+        }
+
+        User user = optionalUser.get();
+
         markUserOnline(username, session);
 
-        Map<String, String> payload = Map.of(
-                "token", token,
-                "RE_LOGIN_CODE", token,
-                "user", username
-        );
+        Map<String, Object> payload = buildAuthPayload(user, token);
 
         sendMessage(session, "success", "RE_LOGIN", "Re-login successful", payload);
     }
@@ -796,6 +832,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 Map<String, Object> userData = new LinkedHashMap<>();
 
                 userData.put("name", user.getUsername());
+                userData.put("username", user.getUsername());
+                userData.put("displayName", getEffectiveDisplayName(user));
+                userData.put("avatar", user.getAvatar());
+                userData.put("bio", user.getBio());
                 userData.put("type", 0);
                 Optional<Message> lastMessage =
                         messageRepository.findTopByTypeAndSenderAndReceiverOrTypeAndSenderAndReceiverOrderByCreatedAtDesc(
@@ -833,6 +873,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     );
 
             roomData.put("name", roomName);
+            roomData.put("displayName", roomName);
+            roomData.put("avatar", null);
             roomData.put("type", 1);
 
             roomData.put(
@@ -912,18 +954,380 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        boolean exists = userRepository.findByUsername(usernameToCheck).isPresent();
+        var optionalUser = userRepository.findByUsername(usernameToCheck);
+        boolean exists = optionalUser.isPresent();
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("user", usernameToCheck);
+        payload.put("username", usernameToCheck);
+        optionalUser.ifPresent(user -> payload.putAll(buildUserPayload(user)));
+        payload.put("status", exists);
+        payload.put("exists", exists);
 
         sendMessage(
                 session,
                 exists ? "success" : "error",
                 "CHECK_USER_EXIST",
                 exists ? "User exists" : "User not found",
-                Map.of(
-                        "user", usernameToCheck,
-                        "status", exists
-                )
+                payload
         );
+    }
+
+    private void handleGetProfile(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String requester = getUsernameFromSession(session);
+        String usernameToView = readString(data, "user", "username", "name");
+
+        if (requester == null) {
+            sendMessage(session, "error", "GET_PROFILE", "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (usernameToView == null) {
+            usernameToView = requester;
+        }
+
+        var optionalUser = userRepository.findByUsername(usernameToView);
+
+        if (optionalUser.isEmpty()) {
+            sendMessage(session, "error", "GET_PROFILE", "Không tìm thấy người dùng", null);
+            return;
+        }
+
+        sendMessage(
+                session,
+                "success",
+                "GET_PROFILE",
+                "Thông tin cá nhân",
+                buildUserPayload(optionalUser.get())
+        );
+    }
+
+    private void handleUpdateProfile(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String username = getUsernameFromSession(session);
+
+        if (username == null) {
+            sendMessage(session, "error", "UPDATE_PROFILE", "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        var optionalUser = userRepository.findByUsername(username);
+
+        if (optionalUser.isEmpty()) {
+            sendMessage(session, "error", "UPDATE_PROFILE", "Không tìm thấy người dùng", null);
+            return;
+        }
+
+        User user = optionalUser.get();
+
+        if (data != null && data.containsKey("displayName")) {
+            user.setDisplayName(cleanText(data.get("displayName"), 100));
+        }
+
+        if (data != null && (data.containsKey("avatar") || data.containsKey("avatarUrl"))) {
+            Object rawAvatar = data.containsKey("avatar") ? data.get("avatar") : data.get("avatarUrl");
+            user.setAvatar(cleanText(rawAvatar, 1000));
+        }
+
+        if (data != null && data.containsKey("bio")) {
+            user.setBio(cleanText(data.get("bio"), 500));
+        }
+
+        User savedUser = userRepository.save(user);
+        Map<String, Object> payload = buildUserPayload(savedUser);
+
+        sendMessage(
+                session,
+                "success",
+                "UPDATE_PROFILE",
+                "Cập nhật thông tin cá nhân thành công",
+                payload
+        );
+
+        for (var conversation : pendingConversationRepository.findAcceptedConversations(username)) {
+            String friendUsername = username.equals(conversation.getFromUsername())
+                    ? conversation.getToUsername()
+                    : conversation.getFromUsername();
+
+            sendRealtimeToUser(
+                    friendUsername,
+                    "PROFILE_UPDATED",
+                    username + " đã cập nhật thông tin cá nhân",
+                    payload
+            );
+
+            refreshUserListForOnlineUser(friendUsername);
+        }
+
+        refreshUserListForOnlineUser(username);
+    }
+
+
+    // =========================================================
+    // WEBRTC VOICE / VIDEO CALL SIGNALING
+    // =========================================================
+
+    private void handleCallInvite(
+            WebSocketSession session,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String from = getUsernameFromSession(session);
+        String to = readString(data, "to", "receiver", "user", "username", "name");
+        String callType = readString(data, "callType", "type");
+        String callId = readString(data, "callId", "id");
+
+        if (from == null) {
+            sendMessage(session, "error", "CALL_INVITE", "Bạn cần đăng nhập trước khi gọi", null);
+            return;
+        }
+
+        if (to == null || to.equals(from)) {
+            sendMessage(session, "error", "CALL_INVITE", "Người nhận cuộc gọi không hợp lệ", null);
+            return;
+        }
+
+        if (userRepository.findByUsername(to).isEmpty()) {
+            sendMessage(session, "error", "CALL_INVITE", "Người dùng không tồn tại", null);
+            return;
+        }
+
+        if (!"video".equalsIgnoreCase(callType)) {
+            callType = "audio";
+        } else {
+            callType = "video";
+        }
+
+        if (callId == null) {
+            callId = from + "_" + to + "_" + System.currentTimeMillis();
+        }
+
+        Map<String, Object> payload = buildCallPayload(from, to, callId, callType, data);
+
+        WebSocketSession targetSession = userSessions.get(to);
+
+        if (targetSession == null || !targetSession.isOpen()) {
+            sendMessage(session, "error", "CALL_INVITE", "Người dùng hiện đang offline", payload);
+            return;
+        }
+
+        sendRealtimeToUser(to, "CALL_INVITE", "Có cuộc gọi đến", payload);
+        sendMessage(session, "success", "CALL_INVITE_SENT", "Đã gửi lời mời gọi", payload);
+    }
+
+    private void handleCallControl(
+            WebSocketSession session,
+            Map<String, Object> data,
+            String forwardEvent,
+            String ackEvent,
+            String defaultMessage
+    ) throws Exception {
+
+        String from = getUsernameFromSession(session);
+        String to = readString(data, "to", "receiver", "user", "username", "name");
+        String callType = readString(data, "callType", "type");
+        String callId = readString(data, "callId", "id");
+
+        if (from == null) {
+            sendMessage(session, "error", ackEvent, "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (to == null || callId == null) {
+            sendMessage(session, "error", ackEvent, "Dữ liệu cuộc gọi không hợp lệ", null);
+            return;
+        }
+
+        Map<String, Object> payload = buildCallPayload(from, to, callId, callType, data);
+
+        Object reason = data == null ? null : data.get("reason");
+        if (reason != null) {
+            payload.put("reason", String.valueOf(reason));
+        }
+
+        sendRealtimeToUser(to, forwardEvent, defaultMessage, payload);
+        sendMessage(session, "success", ackEvent, defaultMessage, payload);
+
+        if (shouldCreateCallLog(forwardEvent)) {
+            createAndBroadcastCallLog(session, from, to, callId, callType, forwardEvent, data);
+        }
+    }
+
+    private boolean shouldCreateCallLog(String event) {
+        return "CALL_REJECTED".equals(event)
+                || "CALL_CANCELED".equals(event)
+                || "CALL_ENDED".equals(event);
+    }
+
+    private void createAndBroadcastCallLog(
+            WebSocketSession requesterSession,
+            String from,
+            String to,
+            String callId,
+            String callType,
+            String event,
+            Map<String, Object> data
+    ) throws Exception {
+
+        if (from == null || to == null || callId == null) {
+            return;
+        }
+
+        String normalizedCallType = "video".equalsIgnoreCase(callType) ? "video" : "audio";
+        String reason = readString(data, "reason");
+        Long durationSeconds = readLong(data, "durationSeconds", "duration", "durationInSeconds");
+
+        if (durationSeconds == null || durationSeconds < 0) {
+            durationSeconds = 0L;
+        }
+
+        String callStatus = resolveCallStatus(event, reason, durationSeconds);
+
+        String caller = readString(data, "caller", "callerUsername");
+        String receiver = readString(data, "receiver", "receiverUsername");
+
+        if (caller == null || receiver == null) {
+            if ("CALL_REJECTED".equals(event)) {
+                caller = to;
+                receiver = from;
+            } else {
+                caller = from;
+                receiver = to;
+            }
+        }
+
+        Map<String, Object> callLog = new LinkedHashMap<>();
+        callLog.put("callId", callId);
+        callLog.put("callType", normalizedCallType);
+        callLog.put("type", normalizedCallType);
+        callLog.put("callStatus", callStatus);
+        callLog.put("status", callStatus);
+        callLog.put("durationSeconds", durationSeconds);
+        callLog.put("caller", caller);
+        callLog.put("receiver", receiver);
+        callLog.put("endedBy", from);
+        callLog.put("reason", reason == null ? "" : reason);
+
+        String content = "[CALL]" + objectMapper.writeValueAsString(callLog);
+
+        Message savedMessage = messageRepository.save(
+                Message.builder()
+                        .type("people")
+                        .sender(from)
+                        .receiver(to)
+                        .content(content)
+                        .status("SENT")
+                        .build()
+        );
+
+        Map<String, Object> messagePayload = toClientMessage(savedMessage);
+
+        sendMessage(requesterSession, "success", "SEND_CHAT", "New message", messagePayload);
+        sendRealtimeToUser(to, "SEND_CHAT", "New message", messagePayload);
+    }
+
+    private String resolveCallStatus(String event, String reason, Long durationSeconds) {
+        if ("CALL_ENDED".equals(event)) {
+            return durationSeconds != null && durationSeconds > 0 ? "completed" : "missed";
+        }
+
+        if ("CALL_CANCELED".equals(event)) {
+            return "missed";
+        }
+
+        String normalizedReason = reason == null ? "" : reason.toLowerCase();
+
+        if (normalizedReason.contains("bận") || normalizedReason.contains("busy")) {
+            return "busy";
+        }
+
+        if (normalizedReason.contains("không nghe")
+                || normalizedReason.contains("khong nghe")
+                || normalizedReason.contains("miss")) {
+            return "missed";
+        }
+
+        return "rejected";
+    }
+
+    private void handleWebRtcSignal(
+            WebSocketSession session,
+            String event,
+            Map<String, Object> data
+    ) throws Exception {
+
+        String from = getUsernameFromSession(session);
+        String to = readString(data, "to", "receiver", "user", "username", "name");
+        String callType = readString(data, "callType", "type");
+        String callId = readString(data, "callId", "id");
+
+        if (from == null) {
+            sendMessage(session, "error", event, "Bạn cần đăng nhập trước", null);
+            return;
+        }
+
+        if (to == null || callId == null) {
+            sendMessage(session, "error", event, "Dữ liệu WebRTC không hợp lệ", null);
+            return;
+        }
+
+        Map<String, Object> payload = buildCallPayload(from, to, callId, callType, data);
+
+        if (data != null) {
+            if (data.containsKey("offer")) {
+                payload.put("offer", data.get("offer"));
+            }
+
+            if (data.containsKey("answer")) {
+                payload.put("answer", data.get("answer"));
+            }
+
+            if (data.containsKey("candidate")) {
+                payload.put("candidate", data.get("candidate"));
+            }
+        }
+
+        WebSocketSession targetSession = userSessions.get(to);
+
+        if (targetSession == null || !targetSession.isOpen()) {
+            sendMessage(session, "error", event, "Người dùng hiện đang offline", payload);
+            return;
+        }
+
+        sendRealtimeToUser(to, event, "WebRTC signaling", payload);
+    }
+
+    private Map<String, Object> buildCallPayload(
+            String from,
+            String to,
+            String callId,
+            String callType,
+            Map<String, Object> rawData
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+
+        payload.put("from", from);
+        payload.put("fromUsername", from);
+        payload.put("to", to);
+        payload.put("toUsername", to);
+        payload.put("callId", callId);
+        payload.put("id", callId);
+        payload.put("callType", "video".equalsIgnoreCase(callType) ? "video" : "audio");
+        payload.put("type", "video".equalsIgnoreCase(callType) ? "video" : "audio");
+        payload.put("createdAt", LocalDateTime.now().toString());
+
+        if (rawData != null && rawData.containsKey("roomName")) {
+            payload.put("roomName", rawData.get("roomName"));
+        }
+
+        return payload;
     }
 
     // =========================================================
@@ -1911,6 +2315,60 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         return response;
     }
 
+    private Map<String, Object> buildAuthPayload(User user, String token) {
+        Map<String, Object> payload = buildUserPayload(user);
+
+        payload.put("token", token);
+        payload.put("RE_LOGIN_CODE", token);
+        payload.put("user", user.getUsername());
+
+        return payload;
+    }
+
+    private Map<String, Object> buildUserPayload(User user) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+
+        payload.put("id", user.getId());
+        payload.put("user", user.getUsername());
+        payload.put("username", user.getUsername());
+        payload.put("name", user.getUsername());
+        payload.put("displayName", getEffectiveDisplayName(user));
+        payload.put("avatar", user.getAvatar());
+        payload.put("bio", user.getBio());
+        payload.put("status", user.getStatus());
+        payload.put("createdAt", user.getCreatedAt() != null ? user.getCreatedAt().toString() : null);
+
+        return payload;
+    }
+
+    private String getEffectiveDisplayName(User user) {
+        String displayName = user.getDisplayName();
+
+        if (displayName == null || displayName.isBlank()) {
+            return user.getUsername();
+        }
+
+        return displayName;
+    }
+
+    private String cleanText(Object rawValue, int maxLength) {
+        if (rawValue == null) {
+            return null;
+        }
+
+        String value = String.valueOf(rawValue).trim();
+
+        if (value.isEmpty()) {
+            return null;
+        }
+
+        if (value.length() > maxLength) {
+            return value.substring(0, maxLength);
+        }
+
+        return value;
+    }
+
     private Map<String, Object> buildRoomData(String roomName) {
         List<String> userList = roomMemberRepository.findByRoomName(roomName)
                 .stream()
@@ -1920,6 +2378,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         Map<String, Object> roomData = new LinkedHashMap<>();
 
         roomData.put("name", roomName);
+        roomData.put("displayName", roomName);
+        roomData.put("avatar", null);
         roomData.put("type", 1);
         roomData.put("own", userList.isEmpty() ? "" : userList.get(0));
         roomData.put("userList", userList);
@@ -1956,6 +2416,25 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         dto.put("status", recalled ? "recalled" : normalizeMessageStatus(message.getStatus()));
         dto.put("deliveredAt", message.getDeliveredAt() != null ? message.getDeliveredAt().toString() : null);
         dto.put("readAt", message.getReadAt() != null ? message.getReadAt().toString() : null);
+
+        if (!recalled && displayContent != null && displayContent.startsWith("[CALL]")) {
+            String callLogJson = displayContent.substring("[CALL]".length()).trim();
+
+            if (!callLogJson.isEmpty()) {
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> callLog = objectMapper.readValue(callLogJson, Map.class);
+                    dto.put("callLog", callLog);
+                } catch (Exception ignored) {
+                    Map<String, Object> fallbackCallLog = new LinkedHashMap<>();
+                    fallbackCallLog.put("callType", "audio");
+                    fallbackCallLog.put("callStatus", "missed");
+                    fallbackCallLog.put("durationSeconds", 0);
+                    dto.put("callLog", fallbackCallLog);
+                }
+            }
+        }
+
         List<Map<String, Object>> reactions = messageReactionRepository
                 .findByMessageId(message.getId())
                 .stream()

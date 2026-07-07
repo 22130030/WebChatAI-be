@@ -2,8 +2,10 @@ package com.appchat.backend.service;
 
 import com.appchat.backend.entity.PendingConversation;
 import com.appchat.backend.repository.PendingConversationRepository;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Optional;
@@ -13,6 +15,18 @@ import java.util.Optional;
 public class PendingConversationService {
 
     private final PendingConversationRepository repository;
+    private final FriendshipService friendshipService;
+
+    @PostConstruct
+    @Transactional
+    public void migrateAcceptedPendingConversations() {
+        repository.findByStatus("ACCEPTED").forEach(pc -> {
+            friendshipService.createFriendship(pc.getFromUsername(), pc.getToUsername());
+            repository.delete(pc);
+        });
+
+        repository.findByStatus("REMOVED").forEach(repository::delete);
+    }
 
     public PendingConversation createRequest(String from, String to) {
         if (from == null || to == null || from.equals(to)) {
@@ -21,19 +35,18 @@ public class PendingConversationService {
 
         Optional<PendingConversation> existing = repository.findBetweenUsers(from, to);
 
-        if (existing.isPresent()) {
-            PendingConversation pc = existing.get();
-
-            if ("ACCEPTED".equals(pc.getStatus())) {
-                return pc;
-            }
-
-            pc.setFromUsername(from);
-            pc.setToUsername(to);
-            pc.setStatus("PENDING");
-
-            return repository.save(pc);
+        if (friendshipService.areFriends(from, to)) {
+            return PendingConversation.builder()
+                    .fromUsername(from)
+                    .toUsername(to)
+                    .status("ACCEPTED")
+                    .build();
         }
+
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+
 
         PendingConversation pc = PendingConversation.builder()
                 .fromUsername(from)
@@ -53,14 +66,23 @@ public class PendingConversationService {
     }
 
     public List<PendingConversation> getAcceptedConversations(String username) {
-        return repository.findAcceptedConversations(username);
+        return friendshipService.findFriendships(username)
+                .stream()
+                .map(friendship -> PendingConversation.builder()
+                        .fromUsername(username)
+                        .toUsername(friendshipService.otherUser(friendship, username))
+                        .status("ACCEPTED")
+                        .createdAt(friendship.getCreatedAt())
+                        .updatedAt(friendship.getCreatedAt())
+                        .build())
+                .toList();
     }
 
     public void acceptRequest(String from, String to) {
         repository.findByFromUsernameAndToUsername(from, to)
                 .ifPresent(pc -> {
-                    pc.setStatus("ACCEPTED");
-                    repository.save(pc);
+                    friendshipService.createFriendship(from, to);
+                    repository.delete(pc);
                 });
     }
 
@@ -70,18 +92,14 @@ public class PendingConversationService {
     }
 
     public void removeContact(String currentUser, String otherUser) {
-        PendingConversation pc = repository.findBetweenUsers(currentUser, otherUser)
-                .orElseThrow(() -> new RuntimeException("Không tìm thấy liên hệ"));
-
-        if (!"ACCEPTED".equals(pc.getStatus())) {
+        if (!friendshipService.areFriends(currentUser, otherUser)) {
             throw new RuntimeException("Hai người chưa là liên hệ");
         }
 
-        pc.setStatus("REMOVED");
-        repository.save(pc);
+        friendshipService.removeFriendship(currentUser, otherUser);
     }
 
     public boolean isAccepted(String user1, String user2) {
-        return repository.existsAcceptedBetween(user1, user2);
+        return friendshipService.areFriends(user1, user2);
     }
 }

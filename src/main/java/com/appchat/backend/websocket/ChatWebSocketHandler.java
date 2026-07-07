@@ -10,6 +10,9 @@ import com.appchat.backend.repository.RoomMemberRepository;
 import com.appchat.backend.repository.RoomRepository;
 import com.appchat.backend.repository.UserRepository;
 import com.appchat.backend.security.JwtUtil;
+import com.appchat.backend.service.AiModerationService;
+import com.appchat.backend.service.FriendshipService;
+import com.appchat.backend.service.OnlineStatusService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -43,6 +46,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final JwtUtil jwtUtil;
     private final PasswordEncoder passwordEncoder;
     private final MessageReactionRepository messageReactionRepository;
+    private final OnlineStatusService onlineStatusService;
+    private final AiModerationService aiModerationService;
+    private final FriendshipService friendshipService;
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> userSessions = new ConcurrentHashMap<>();
 
@@ -65,8 +71,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String username = getUsernameFromSession(session);
 
         if (username != null) {
-            userSessions.remove(username);
-            markUserOffline(username);
+            WebSocketSession currentSession = userSessions.get(username);
+
+            if (currentSession != null && currentSession.getId().equals(session.getId())) {
+                userSessions.remove(username);
+                markUserOffline(username);
+            }
         }
     }
 
@@ -300,19 +310,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        Optional<PendingConversation> optional =
-                pendingConversationRepository.findBetweenUsers(currentUser, otherUser);
-
-        if (optional.isEmpty() || !"ACCEPTED".equals(optional.get().getStatus())) {
+        if (!friendshipService.areFriends(currentUser, otherUser)) {
             sendMessage(session, "error", "REMOVE_CONTACT", "Không tìm thấy liên hệ", null);
             return;
         }
 
-        PendingConversation pc = optional.get();
-        pc.setStatus("REMOVED");
-        pendingConversationRepository.save(pc);
+        friendshipService.removeFriendship(currentUser, otherUser);
 
-        Map<String, Object> payload = toClientPendingConversation(pc);
+        Map<String, Object> payload = buildFriendshipPayload(currentUser, otherUser);
 
         sendMessage(session, "success", "REMOVE_CONTACT", "Đã xóa liên hệ", payload);
         sendRealtimeToUser(otherUser, "CONTACT_REMOVED", currentUser + " đã xóa liên hệ", payload);
@@ -331,7 +336,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     ) throws Exception {
 
         String username = getUsernameFromSession(session);
-        Long messageId = readLong(data, "messageId", "id");
+        String messageId = readString(data, "messageId", "id");
         String reaction = readString(data, "reaction", "emoji");
 
         if ("REMOVE".equalsIgnoreCase(reaction)) {
@@ -425,30 +430,35 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        PendingConversation pc = pendingConversationRepository.findBetweenUsers(from, to)
-                .map(existing -> {
-                    if (!"ACCEPTED".equals(existing.getStatus())) {
-                        existing.setFromUsername(from);
-                        existing.setToUsername(to);
-                        existing.setStatus("PENDING");
-                    }
-
-                    return pendingConversationRepository.save(existing);
-                })
-                .orElseGet(() -> pendingConversationRepository.save(
-                        PendingConversation.builder()
-                                .fromUsername(from)
-                                .toUsername(to)
-                                .status("PENDING")
-                                .build()
-                ));
-
-        Map<String, Object> payload = toClientPendingConversation(pc);
-
-        if ("ACCEPTED".equals(pc.getStatus())) {
-            sendMessage(session, "success", "SEND_CONTACT_REQUEST", "Hai người đã có trong danh sách liên hệ", payload);
+        if (friendshipService.areFriends(from, to)) {
+            sendMessage(session, "success", "SEND_CONTACT_REQUEST", "Hai người đã có trong danh sách liên hệ", buildFriendshipPayload(from, to));
             return;
         }
+
+        Optional<PendingConversation> existingRequest = pendingConversationRepository.findBetweenUsers(from, to);
+
+        if (existingRequest.isPresent()) {
+            PendingConversation existing = existingRequest.get();
+            Map<String, Object> payload = toClientPendingConversation(existing);
+
+            if (from.equals(existing.getFromUsername())) {
+                sendMessage(session, "success", "SEND_CONTACT_REQUEST", "Bạn đã gửi lời mời liên hệ trước đó", payload);
+            } else {
+                sendMessage(session, "success", "SEND_CONTACT_REQUEST", "Người này đã gửi lời mời cho bạn. Hãy chấp nhận lời mời.", payload);
+            }
+
+            return;
+        }
+
+        PendingConversation pc = pendingConversationRepository.save(
+                PendingConversation.builder()
+                        .fromUsername(from)
+                        .toUsername(to)
+                        .status("PENDING")
+                        .build()
+        );
+
+        Map<String, Object> payload = toClientPendingConversation(pc);
 
         sendMessage(session, "success", "SEND_CONTACT_REQUEST", "Đã gửi lời mời liên hệ", payload);
         sendRealtimeToUser(to, "CONTACT_REQUEST_RECEIVED", "Bạn có lời mời liên hệ mới", payload);
@@ -476,10 +486,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 .map(this::toClientPendingConversation)
                 .toList());
 
-        payload.put("accepted", pendingConversationRepository
-                .findAcceptedConversations(username)
+        payload.put("accepted", friendshipService
+                .findFriendships(username)
                 .stream()
-                .map(this::toClientPendingConversation)
+                .map(friendship -> buildFriendshipPayload(username, friendshipService.otherUser(friendship, username)))
                 .toList());
 
         sendMessage(session, "success", "GET_CONTACT_REQUESTS", "Danh sách lời mời liên hệ", payload);
@@ -512,10 +522,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         PendingConversation pc = pending.get();
-        pc.setStatus("ACCEPTED");
-        pc = pendingConversationRepository.save(pc);
+        friendshipService.createFriendship(from, currentUser);
+        pendingConversationRepository.delete(pc);
 
-        Map<String, Object> payload = toClientPendingConversation(pc);
+        Map<String, Object> payload = buildFriendshipPayload(from, currentUser);
 
         sendMessage(session, "success", "ACCEPT_CONTACT_REQUEST", "Đã chấp nhận lời mời liên hệ", payload);
         sendRealtimeToUser(from, "CONTACT_REQUEST_ACCEPTED", currentUser + " đã chấp nhận lời mời liên hệ", payload);
@@ -583,6 +593,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         data.put("status", pc.getStatus());
         data.put("createdAt", pc.getCreatedAt() == null ? null : pc.getCreatedAt().toString());
         data.put("updatedAt", pc.getUpdatedAt() == null ? null : pc.getUpdatedAt().toString());
+
+        return data;
+    }
+
+    private Map<String, Object> buildFriendshipPayload(String userA, String userB) {
+        Map<String, Object> data = new LinkedHashMap<>();
+
+        data.put("from", userA);
+        data.put("fromUsername", userA);
+        data.put("to", userB);
+        data.put("toUsername", userB);
+        data.put("status", "ACCEPTED");
+        data.put("friendship", true);
 
         return data;
     }
@@ -811,8 +834,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String username = getUsernameFromSession(session);
 
         if (username != null) {
-            userSessions.remove(username);
-            markUserOffline(username);
+            WebSocketSession currentSession = userSessions.get(username);
+
+            if (currentSession != null && currentSession.getId().equals(session.getId())) {
+                userSessions.remove(username);
+                markUserOffline(username);
+            }
         }
 
         sendMessage(
@@ -837,10 +864,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         List<Map<String, Object>> responseList = new ArrayList<>();
 
-        for (var conversation : pendingConversationRepository.findAcceptedConversations(username)) {
-            String friendUsername = username.equals(conversation.getFromUsername())
-                    ? conversation.getToUsername()
-                    : conversation.getFromUsername();
+        for (var friendship : friendshipService.findFriendships(username)) {
+            String friendUsername = friendshipService.otherUser(friendship, username);
 
             userRepository.findByUsername(friendUsername).ifPresent(user -> {
                 Map<String, Object> userData = new LinkedHashMap<>();
@@ -851,6 +876,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 userData.put("avatar", user.getAvatar());
                 userData.put("bio", user.getBio());
                 userData.put("type", 0);
+
+                boolean online = isUserOnline(user.getUsername());
+                userData.put("status", online ? "ONLINE" : "OFFLINE");
+                userData.put("online", online);
+
                 Optional<Message> lastMessage =
                         messageRepository.findTopByTypeAndSenderAndReceiverOrTypeAndSenderAndReceiverOrderByCreatedAtDesc(
                                 "people", username, friendUsername,
@@ -861,8 +891,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         "actionTime",
                         lastMessage
                                 .map(message -> message.getCreatedAt().toString())
-                                .orElse(conversation.getUpdatedAt() != null
-                                        ? conversation.getUpdatedAt().toString()
+                                .orElse(friendship.getCreatedAt() != null
+                                        ? friendship.getCreatedAt().toString()
                                         : LocalDateTime.MIN.toString())
                 );
 
@@ -939,9 +969,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        boolean online = userSessions.containsKey(usernameToCheck)
-                && userSessions.get(usernameToCheck) != null
-                && userSessions.get(usernameToCheck).isOpen();
+        boolean online = isUserOnline(usernameToCheck);
 
         sendMessage(
                 session,
@@ -1070,10 +1098,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 payload
         );
 
-        for (var conversation : pendingConversationRepository.findAcceptedConversations(username)) {
-            String friendUsername = username.equals(conversation.getFromUsername())
-                    ? conversation.getToUsername()
-                    : conversation.getFromUsername();
+        for (var friendship : friendshipService.findFriendships(username)) {
+            String friendUsername = friendshipService.otherUser(friendship, username);
 
             sendRealtimeToUser(
                     friendUsername,
@@ -1555,6 +1581,28 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        AiModerationService.ModerationResult moderationResult =
+                aiModerationService.moderate(messageContent);
+
+        if (!moderationResult.allowed()) {
+            Map<String, Object> moderationPayload = new LinkedHashMap<>();
+            String failureMessage = buildModerationFailureMessage(moderationResult.flags());
+
+            moderationPayload.put("rejected", true);
+            moderationPayload.put("reason", "AI_MODERATION");
+            moderationPayload.put("flags", moderationResult.flags());
+            moderationPayload.put("report", moderationResult.report());
+
+            sendMessage(
+                    session,
+                    "error",
+                    "SEND_CHAT",
+                    failureMessage,
+                    moderationPayload
+            );
+            return;
+        }
+
         if ("room".equals(type)) {
             if (roomRepository.findByName(to).isEmpty()) {
                 sendMessage(session, "error", "SEND_CHAT", "Nhóm không tồn tại", null);
@@ -1567,6 +1615,18 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             }
         } else if (userRepository.findByUsername(to).isEmpty()) {
             sendMessage(session, "error", "SEND_CHAT", "Người nhận không tồn tại", null);
+            return;
+        } else if (!friendshipService.areFriends(sender, to)) {
+            sendMessage(
+                    session,
+                    "error",
+                    "SEND_CHAT",
+                    "Bạn cần kết bạn trước khi gửi tin nhắn",
+                    Map.of(
+                            "rejected", true,
+                            "reason", "CONTACT_REQUIRED"
+                    )
+            );
             return;
         }
 
@@ -1625,14 +1685,44 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         return message;
     }
 
+    private String buildModerationFailureMessage(List<String> flags) {
+        if (flags == null || flags.isEmpty()) {
+            return "Tin nhắn không hợp lệ nên không thể gửi.";
+        }
+
+        boolean spam = flags.stream().anyMatch(flag -> "spam".equalsIgnoreCase(flag));
+        boolean toxic = flags.stream().anyMatch(flag ->
+                "toxic".equalsIgnoreCase(flag)
+                        || "severe_toxic".equalsIgnoreCase(flag)
+                        || "obscene".equalsIgnoreCase(flag)
+                        || "insult".equalsIgnoreCase(flag)
+                        || "identity_hate".equalsIgnoreCase(flag)
+        );
+        boolean threat = flags.stream().anyMatch(flag -> "threat".equalsIgnoreCase(flag));
+
+        if (threat) {
+            return "Tin nhắn không hợp lệ vì có nội dung đe dọa hoặc bạo lực.";
+        }
+
+        if (toxic) {
+            return "Tin nhắn không hợp lệ vì có nội dung thô tục hoặc xúc phạm.";
+        }
+
+        if (spam) {
+            return "Tin nhắn không hợp lệ vì bị phát hiện là spam hoặc quảng cáo.";
+        }
+
+        return "Tin nhắn không hợp lệ nên không thể gửi.";
+    }
+
     private boolean isUserOnline(String username) {
         WebSocketSession session = userSessions.get(username);
-        return session != null && session.isOpen();
+        return (session != null && session.isOpen()) || onlineStatusService.isOnline(username);
     }
 
     private void handleMarkRead(WebSocketSession session, Map<String, Object> data) throws Exception {
         String reader = getUsernameFromSession(session);
-        Long messageId = readLong(data, "id", "messageId");
+        String messageId = readString(data, "id", "messageId");
 
         if (reader == null || messageId == null) {
             sendMessage(session, "error", "MARK_READ", "Invalid read receipt request", null);
@@ -1726,7 +1816,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     ) throws Exception {
 
         String requester = getUsernameFromSession(session);
-        Long messageId = readLong(data, "id", "messageId");
+        String messageId = readString(data, "id", "messageId");
 
         if (requester == null) {
             sendMessage(session, "error", "RECALL_MESSAGE", "Bạn cần đăng nhập trước", null);
@@ -1808,7 +1898,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     ) throws Exception {
 
         String requester = getUsernameFromSession(session);
-        Long messageId = readLong(data, "id", "messageId");
+        String messageId = readString(data, "id", "messageId");
         String newContent = readString(data, "content", "mes", "message", "newContent");
 
         if (requester == null) {
@@ -2522,7 +2612,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         roomRepository.saveAndFlush(room);
         roomMemberRepository.renameRoomName(oldName, newName);
-        messageRepository.renameRoomMessages(oldName, newName);
+        messageRepository.findByTypeAndReceiver("room", oldName).forEach(message -> {
+            message.setReceiver(newName);
+            messageRepository.save(message);
+        });
         groupThemeRepository.renameGroupTheme(oldName, newName);
 
         Map<String, Object> roomData = buildRoomData(newName);
@@ -2605,7 +2698,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (remainingBeforeLeave.isEmpty()) {
             roomMemberRepository.deleteMemberFromRoom(roomName, requester);
             groupThemeRepository.deleteByGroupName(roomName);
-            messageRepository.deleteRoomMessages(roomName);
+            messageRepository.deleteByTypeAndReceiver("room", roomName);
             roomRepository.delete(room);
 
             leaveData.put("deleted", true);
@@ -2761,7 +2854,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         payload.put("displayName", getEffectiveDisplayName(user));
         payload.put("avatar", user.getAvatar());
         payload.put("bio", user.getBio());
-        payload.put("status", user.getStatus());
+        payload.put("role", user.getRole());
+        payload.put("status", isUserOnline(user.getUsername()) ? "ONLINE" : "OFFLINE");
         payload.put("createdAt", user.getCreatedAt() != null ? user.getCreatedAt().toString() : null);
 
         return payload;
@@ -2867,7 +2961,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         memberData.put("displayName", getEffectiveDisplayName(user));
                         memberData.put("avatar", user.getAvatar());
                         memberData.put("bio", user.getBio());
-                        memberData.put("status", user.getStatus());
+                        memberData.put("status", isUserOnline(user.getUsername()) ? "ONLINE" : "OFFLINE");
                     });
 
                     return memberData;
@@ -3052,20 +3146,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void markUserOnline(String username, WebSocketSession session) {
         userSessions.put(username, session);
-
-        userRepository.findByUsername(username).ifPresent(user -> {
-            user.setStatus("ONLINE");
-            userRepository.save(user);
-        });
+        onlineStatusService.markOnline(username, session.getId());
 
         broadcastUserStatus(username, true);
     }
 
     private void markUserOffline(String username) {
-        userRepository.findByUsername(username).ifPresent(user -> {
-            user.setStatus("OFFLINE");
-            userRepository.save(user);
-        });
+        onlineStatusService.markOffline(username);
 
         broadcastUserStatus(username, false);
     }

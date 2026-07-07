@@ -25,7 +25,7 @@ public class JwtUtil {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public String generateToken(String username) {
+    public String generateToken(String username, String role) {
         try {
             long nowSeconds = Instant.now().getEpochSecond();
             long expSeconds = nowSeconds + (expirationMs / 1000);
@@ -36,6 +36,7 @@ public class JwtUtil {
 
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("sub", username);
+            payload.put("role", role);
             payload.put("iat", nowSeconds);
             payload.put("exp", expSeconds);
 
@@ -50,6 +51,11 @@ public class JwtUtil {
         }
     }
 
+    // Backward-compatible overload (default role USER)
+    public String generateToken(String username) {
+        return generateToken(username, "USER");
+    }
+
     public String getUsernameFromToken(String token) {
         try {
             Map<String, Object> payload = parsePayload(token);
@@ -57,6 +63,16 @@ public class JwtUtil {
             return subject == null ? null : subject.toString();
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    public String getRoleFromToken(String token) {
+        try {
+            Map<String, Object> payload = parsePayload(token);
+            Object role = payload.get("role");
+            return role == null ? "USER" : role.toString();
+        } catch (Exception e) {
+            return "USER";
         }
     }
 

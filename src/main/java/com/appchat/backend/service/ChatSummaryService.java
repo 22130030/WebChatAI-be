@@ -106,7 +106,7 @@ public class ChatSummaryService {
                     .build();
         }
 
-        Long lastMessageId = getLastMessageId(messages);
+        String lastMessageId = getLastMessageId(messages);
         int messageCount = messages.size();
 
         if (!force) {
@@ -236,7 +236,7 @@ public class ChatSummaryService {
             String currentUsername,
             int limit,
             int messageCount,
-            Long lastMessageId,
+            String lastMessageId,
             DateRange dateRange
     ) {
         List<ChatSummary> summaries = chatSummaryRepository.findReusableSummary(
@@ -638,7 +638,7 @@ public class ChatSummaryService {
                 .build();
     }
 
-    private Long getLastMessageId(List<Message> messages) {
+    private String getLastMessageId(List<Message> messages) {
         if (messages == null || messages.isEmpty()) {
             return null;
         }

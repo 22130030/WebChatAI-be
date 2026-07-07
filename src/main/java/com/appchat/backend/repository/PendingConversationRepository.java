@@ -14,6 +14,8 @@ public interface PendingConversationRepository extends JpaRepository<PendingConv
 
     List<PendingConversation> findByFromUsernameAndStatus(String fromUsername, String status);
 
+    List<PendingConversation> findByStatus(String status);
+
     Optional<PendingConversation> findByFromUsernameAndToUsername(
             String fromUsername,
             String toUsername
@@ -29,26 +31,4 @@ public interface PendingConversationRepository extends JpaRepository<PendingConv
             @Param("u2") String u2
     );
 
-    @Query("""
-        SELECT pc FROM PendingConversation pc
-        WHERE pc.status = 'ACCEPTED'
-          AND (pc.fromUsername = :username OR pc.toUsername = :username)
-    """)
-    List<PendingConversation> findAcceptedConversations(
-            @Param("username") String username
-    );
-
-    @Query("""
-        SELECT COUNT(pc) > 0 FROM PendingConversation pc
-        WHERE pc.status = 'ACCEPTED'
-          AND (
-            (pc.fromUsername = :u1 AND pc.toUsername = :u2)
-            OR
-            (pc.fromUsername = :u2 AND pc.toUsername = :u1)
-          )
-    """)
-    boolean existsAcceptedBetween(
-            @Param("u1") String u1,
-            @Param("u2") String u2
-    );
 }

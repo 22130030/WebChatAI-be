@@ -39,7 +39,7 @@ public interface ChatSummaryRepository extends JpaRepository<ChatSummary, Long> 
             String createdBy,
             Integer messageLimit,
             Integer messageCount,
-            Long lastMessageId,
+            String lastMessageId,
             LocalDateTime fromTime,
             LocalDateTime toTime,
             Pageable pageable

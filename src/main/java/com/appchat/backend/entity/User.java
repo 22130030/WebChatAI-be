@@ -36,6 +36,10 @@ public class User {
     @Column(length = 50)
     private String status = "OFFLINE";
 
+    @Builder.Default
+    @Column(length = 20, nullable = false)
+    private String role = "USER";
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

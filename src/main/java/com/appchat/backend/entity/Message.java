@@ -1,13 +1,17 @@
 package com.appchat.backend.entity;
 
-import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.Indexed;
+import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.LocalDateTime;
 
-@Entity
-@Table(name = "messages")
+@Document(collection = "messages")
+@CompoundIndex(name = "people_messages_idx", def = "{'type': 1, 'sender': 1, 'receiver': 1, 'createdAt': -1}")
+@CompoundIndex(name = "room_messages_idx", def = "{'type': 1, 'receiver': 1, 'createdAt': -1}")
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -15,40 +19,33 @@ import java.time.LocalDateTime;
 public class Message {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    private String id;
 
-    @Column(nullable = false, length = 50)
+    @Indexed
     private String type; // 'people' hoặc 'room'
 
-    @Column(nullable = false)
+    @Indexed
     private String sender;
 
-    @Column(nullable = false)
+    @Indexed
     private String receiver;
 
-    @Lob
     private String content;
 
     @Builder.Default
-    @Column(nullable = false)
     private Boolean recalled = false;
 
     @Builder.Default
-    @Column(nullable = false)
     private Boolean edited = false;
 
     @Builder.Default
-    @Column(nullable = false, length = 20)
     private String status = "SENT";
 
-    @Column(name = "delivered_at")
     private LocalDateTime deliveredAt;
 
-    @Column(name = "read_at")
     private LocalDateTime readAt;
 
-    @CreationTimestamp
-    @Column(name = "created_at", updatable = false)
+    @CreatedDate
+    @Indexed
     private LocalDateTime createdAt;
 }

@@ -22,7 +22,7 @@ public class ChatSummaryDto {
 
     private Integer limit;
     private Integer messageCount;
-    private Long lastMessageId;
+    private String lastMessageId;
 
     private String summary;
 

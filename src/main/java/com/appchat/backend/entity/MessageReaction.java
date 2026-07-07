@@ -1,18 +1,16 @@
 package com.appchat.backend.entity;
 
-import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.Indexed;
+import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.LocalDateTime;
 
-@Entity
-@Table(
-        name = "message_reactions",
-        uniqueConstraints = {
-                @UniqueConstraint(columnNames = {"message_id", "username"})
-        }
-)
+@Document(collection = "message_reactions")
+@CompoundIndex(name = "message_reaction_unique_idx", def = "{'messageId': 1, 'username': 1}", unique = true)
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -20,19 +18,16 @@ import java.time.LocalDateTime;
 public class MessageReaction {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    private String id;
 
-    @Column(name = "message_id", nullable = false)
-    private Long messageId;
+    @Indexed
+    private String messageId;
 
-    @Column(nullable = false)
+    @Indexed
     private String username;
 
-    @Column(nullable = false, length = 20)
     private String reaction;
 
-    @CreationTimestamp
-    @Column(name = "created_at", updatable = false)
+    @CreatedDate
     private LocalDateTime createdAt;
 }

@@ -10,6 +10,7 @@ import com.appchat.backend.repository.RoomMemberRepository;
 import com.appchat.backend.repository.RoomRepository;
 import com.appchat.backend.repository.UserRepository;
 import com.appchat.backend.security.JwtUtil;
+import com.appchat.backend.service.OnlineStatusService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -43,6 +44,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final JwtUtil jwtUtil;
     private final PasswordEncoder passwordEncoder;
     private final MessageReactionRepository messageReactionRepository;
+    private final OnlineStatusService onlineStatusService;
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> userSessions = new ConcurrentHashMap<>();
 
@@ -331,7 +333,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     ) throws Exception {
 
         String username = getUsernameFromSession(session);
-        Long messageId = readLong(data, "messageId", "id");
+        String messageId = readString(data, "messageId", "id");
         String reaction = readString(data, "reaction", "emoji");
 
         if ("REMOVE".equalsIgnoreCase(reaction)) {
@@ -939,9 +941,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        boolean online = userSessions.containsKey(usernameToCheck)
-                && userSessions.get(usernameToCheck) != null
-                && userSessions.get(usernameToCheck).isOpen();
+        boolean online = isUserOnline(usernameToCheck);
 
         sendMessage(
                 session,
@@ -1468,12 +1468,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private boolean isUserOnline(String username) {
         WebSocketSession session = userSessions.get(username);
-        return session != null && session.isOpen();
+        return (session != null && session.isOpen()) || onlineStatusService.isOnline(username);
     }
 
     private void handleMarkRead(WebSocketSession session, Map<String, Object> data) throws Exception {
         String reader = getUsernameFromSession(session);
-        Long messageId = readLong(data, "id", "messageId");
+        String messageId = readString(data, "id", "messageId");
 
         if (reader == null || messageId == null) {
             sendMessage(session, "error", "MARK_READ", "Invalid read receipt request", null);
@@ -1567,7 +1567,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     ) throws Exception {
 
         String requester = getUsernameFromSession(session);
-        Long messageId = readLong(data, "id", "messageId");
+        String messageId = readString(data, "id", "messageId");
 
         if (requester == null) {
             sendMessage(session, "error", "RECALL_MESSAGE", "Bạn cần đăng nhập trước", null);
@@ -1649,7 +1649,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     ) throws Exception {
 
         String requester = getUsernameFromSession(session);
-        Long messageId = readLong(data, "id", "messageId");
+        String messageId = readString(data, "id", "messageId");
         String newContent = readString(data, "content", "mes", "message", "newContent");
 
         if (requester == null) {
@@ -2363,7 +2363,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         roomRepository.saveAndFlush(room);
         roomMemberRepository.renameRoomName(oldName, newName);
-        messageRepository.renameRoomMessages(oldName, newName);
+        messageRepository.findByTypeAndReceiver("room", oldName).forEach(message -> {
+            message.setReceiver(newName);
+            messageRepository.save(message);
+        });
         groupThemeRepository.renameGroupTheme(oldName, newName);
 
         Map<String, Object> roomData = buildRoomData(newName);
@@ -2446,7 +2449,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (remainingBeforeLeave.isEmpty()) {
             roomMemberRepository.deleteMemberFromRoom(roomName, requester);
             groupThemeRepository.deleteByGroupName(roomName);
-            messageRepository.deleteRoomMessages(roomName);
+            messageRepository.deleteByTypeAndReceiver("room", roomName);
             roomRepository.delete(room);
 
             leaveData.put("deleted", true);
@@ -2602,7 +2605,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         payload.put("displayName", getEffectiveDisplayName(user));
         payload.put("avatar", user.getAvatar());
         payload.put("bio", user.getBio());
-        payload.put("status", user.getStatus());
+        payload.put("status", onlineStatusService.statusOf(user.getUsername()));
         payload.put("createdAt", user.getCreatedAt() != null ? user.getCreatedAt().toString() : null);
 
         return payload;
@@ -2708,7 +2711,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         memberData.put("displayName", getEffectiveDisplayName(user));
                         memberData.put("avatar", user.getAvatar());
                         memberData.put("bio", user.getBio());
-                        memberData.put("status", user.getStatus());
+                        memberData.put("status", onlineStatusService.statusOf(user.getUsername()));
                     });
 
                     return memberData;
@@ -2893,20 +2896,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void markUserOnline(String username, WebSocketSession session) {
         userSessions.put(username, session);
-
-        userRepository.findByUsername(username).ifPresent(user -> {
-            user.setStatus("ONLINE");
-            userRepository.save(user);
-        });
+        onlineStatusService.markOnline(username, session.getId());
 
         broadcastUserStatus(username, true);
     }
 
     private void markUserOffline(String username) {
-        userRepository.findByUsername(username).ifPresent(user -> {
-            user.setStatus("OFFLINE");
-            userRepository.save(user);
-        });
+        onlineStatusService.markOffline(username);
 
         broadcastUserStatus(username, false);
     }

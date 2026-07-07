@@ -54,8 +54,8 @@ public class ChatSummary {
     @Column(name = "message_count")
     private Integer messageCount;
 
-    @Column(name = "last_message_id")
-    private Long lastMessageId;
+    @Column(name = "last_message_id", length = 64)
+    private String lastMessageId;
 
     @Column(name = "summary_text", nullable = false, columnDefinition = "TEXT")
     private String summaryText;

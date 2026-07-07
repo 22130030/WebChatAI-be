@@ -1,6 +1,7 @@
 package com.appchat.backend.security;
 
 import com.appchat.backend.repository.UserRepository;
+import com.appchat.backend.service.OnlineStatusService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -21,6 +22,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtUtil jwtUtil;
     private final UserRepository userRepository;
+    private final OnlineStatusService onlineStatusService;
 
     @Override
     protected void doFilterInternal(
@@ -36,6 +38,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
             if (jwtUtil.isTokenValid(token) && SecurityContextHolder.getContext().getAuthentication() == null) {
                 String username = jwtUtil.getUsernameFromToken(token);
+                onlineStatusService.markOnline(username, "http");
 
                 // Tra cứu role thực từ DB (tránh JWT cũ có role sai)
                 String role = userRepository.findByUsername(username)

@@ -24,6 +24,8 @@ public class AdminService {
     private final MessageRepository messageRepository;
     private final PendingConversationRepository pendingConversationRepository;
     private final ChatSummaryRepository chatSummaryRepository;
+    private final OnlineStatusService onlineStatusService;
+    private final FriendshipRepository friendshipRepository;
 
     // =========================================================
     // DASHBOARD STATS
@@ -33,7 +35,10 @@ public class AdminService {
         LocalDateTime startOfDay = LocalDateTime.now().toLocalDate().atStartOfDay();
 
         long totalUsers = userRepository.count();
-        long onlineUsers = userRepository.countByStatus("ONLINE");
+        long onlineUsers = userRepository.findAll()
+                .stream()
+                .filter(user -> onlineStatusService.isOnline(user.getUsername()))
+                .count();
         long totalRooms = roomRepository.count();
         long totalMessages = messageRepository.count();
         long newUsersToday = userRepository.countByCreatedAtAfter(startOfDay);
@@ -119,6 +124,10 @@ public class AdminService {
         pendingConversationRepository.findAll().stream()
                 .filter(pc -> username.equals(pc.getFromUsername()) || username.equals(pc.getToUsername()))
                 .forEach(pendingConversationRepository::delete);
+
+        // Xóa friendships
+        friendshipRepository.findByUsername(username)
+                .forEach(friendshipRepository::delete);
 
         // Xóa messages của user (MongoDB)
         messageRepository.findAll().stream()
@@ -245,7 +254,7 @@ public class AdminService {
                 .displayName(user.getDisplayName())
                 .avatar(user.getAvatar())
                 .bio(user.getBio())
-                .status(user.getStatus())
+                .status(onlineStatusService.statusOf(user.getUsername()))
                 .role(user.getRole())
                 .createdAt(user.getCreatedAt())
                 .build();

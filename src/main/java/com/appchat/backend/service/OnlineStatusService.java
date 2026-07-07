@@ -6,6 +6,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 @RequiredArgsConstructor
@@ -17,6 +19,7 @@ public class OnlineStatusService {
     private static final long REDIS_COOLDOWN_MS = 10000; // 10 seconds cooldown
 
     private final StringRedisTemplate redisTemplate;
+    private final Map<String, Long> localOnlineUntil = new ConcurrentHashMap<>();
 
     private volatile boolean redisAvailable = true;
     private volatile long lastFailureTime = 0;
@@ -25,6 +28,8 @@ public class OnlineStatusService {
         if (username == null || username.isBlank()) {
             return;
         }
+        localOnlineUntil.put(username, System.currentTimeMillis() + ONLINE_TTL.toMillis());
+
         if (!checkRedisAvailable()) {
             return;
         }
@@ -40,6 +45,8 @@ public class OnlineStatusService {
         if (username == null || username.isBlank()) {
             return;
         }
+        localOnlineUntil.remove(username);
+
         if (!checkRedisAvailable()) {
             return;
         }
@@ -55,6 +62,11 @@ public class OnlineStatusService {
         if (username == null || username.isBlank()) {
             return false;
         }
+
+        if (isLocallyOnline(username)) {
+            return true;
+        }
+
         if (!checkRedisAvailable()) {
             return false;
         }
@@ -73,6 +85,21 @@ public class OnlineStatusService {
 
     private String key(String username) {
         return ONLINE_KEY_PREFIX + username;
+    }
+
+    private boolean isLocallyOnline(String username) {
+        Long onlineUntil = localOnlineUntil.get(username);
+
+        if (onlineUntil == null) {
+            return false;
+        }
+
+        if (onlineUntil >= System.currentTimeMillis()) {
+            return true;
+        }
+
+        localOnlineUntil.remove(username);
+        return false;
     }
 
     private boolean checkRedisAvailable() {

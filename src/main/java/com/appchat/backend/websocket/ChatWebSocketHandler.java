@@ -1100,11 +1100,66 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         String from = getUsernameFromSession(session);
         String to = readString(data, "to", "receiver", "user", "username", "name");
-        String callType = readString(data, "callType", "type");
+        String roomName = readString(data, "roomName", "room", "groupName");
+        String callType = normalizeCallType(readString(data, "callType", "type"));
         String callId = readString(data, "callId", "id");
+        boolean isGroupCall = isGroupCallPayload(data, roomName);
 
         if (from == null) {
             sendMessage(session, "error", "CALL_INVITE", "Bạn cần đăng nhập trước khi gọi", null);
+            return;
+        }
+
+        if (callId == null) {
+            callId = from + "_" + (isGroupCall ? roomName : to) + "_" + System.currentTimeMillis();
+        }
+
+        if (isGroupCall) {
+            if (roomName == null) {
+                roomName = to;
+            }
+
+            if (roomName == null || roomRepository.findByName(roomName).isEmpty()) {
+                sendMessage(session, "error", "CALL_INVITE", "Nhóm không tồn tại", null);
+                return;
+            }
+
+            if (!roomMemberRepository.existsByRoomNameAndUsername(roomName, from)) {
+                sendMessage(session, "error", "CALL_INVITE", "Bạn không thuộc nhóm này", null);
+                return;
+            }
+
+            List<String> participants = roomMemberRepository.findByRoomName(roomName)
+                    .stream()
+                    .map(RoomMember::getUsername)
+                    .toList();
+
+            Map<String, Object> payload = buildCallPayload(from, roomName, callId, callType, data);
+            payload.put("isGroupCall", true);
+            payload.put("roomName", roomName);
+            payload.put("chatType", "room");
+            payload.put("participants", participants);
+
+            boolean hasOnlineReceiver = false;
+
+            for (String memberUsername : participants) {
+                if (from.equals(memberUsername)) {
+                    continue;
+                }
+
+                WebSocketSession targetSession = userSessions.get(memberUsername);
+                if (targetSession != null && targetSession.isOpen()) {
+                    hasOnlineReceiver = true;
+                    sendRealtimeToUser(memberUsername, "CALL_INVITE", "Có cuộc gọi nhóm đến", payload);
+                }
+            }
+
+            if (!hasOnlineReceiver) {
+                sendMessage(session, "error", "CALL_INVITE", "Không có thành viên nào trong nhóm đang online", payload);
+                return;
+            }
+
+            sendMessage(session, "success", "CALL_INVITE_SENT", "Đã gửi lời mời gọi nhóm", payload);
             return;
         }
 
@@ -1118,17 +1173,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        if (!"video".equalsIgnoreCase(callType)) {
-            callType = "audio";
-        } else {
-            callType = "video";
-        }
-
-        if (callId == null) {
-            callId = from + "_" + to + "_" + System.currentTimeMillis();
-        }
-
         Map<String, Object> payload = buildCallPayload(from, to, callId, callType, data);
+        payload.put("isGroupCall", false);
+        payload.put("chatType", "people");
 
         WebSocketSession targetSession = userSessions.get(to);
 
@@ -1151,20 +1198,63 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         String from = getUsernameFromSession(session);
         String to = readString(data, "to", "receiver", "user", "username", "name");
-        String callType = readString(data, "callType", "type");
+        String roomName = readString(data, "roomName", "room", "groupName");
+        String callType = normalizeCallType(readString(data, "callType", "type"));
         String callId = readString(data, "callId", "id");
+        boolean isGroupCall = isGroupCallPayload(data, roomName);
 
         if (from == null) {
             sendMessage(session, "error", ackEvent, "Bạn cần đăng nhập trước", null);
             return;
         }
 
-        if (to == null || callId == null) {
+        if (callId == null) {
+            sendMessage(session, "error", ackEvent, "Dữ liệu cuộc gọi không hợp lệ", null);
+            return;
+        }
+
+        if (isGroupCall) {
+            if (roomName == null) {
+                roomName = to;
+            }
+
+            if (roomName == null || roomRepository.findByName(roomName).isEmpty()) {
+                sendMessage(session, "error", ackEvent, "Nhóm không tồn tại", null);
+                return;
+            }
+
+            if (!roomMemberRepository.existsByRoomNameAndUsername(roomName, from)) {
+                sendMessage(session, "error", ackEvent, "Bạn không thuộc nhóm này", null);
+                return;
+            }
+
+            Map<String, Object> payload = buildCallPayload(from, roomName, callId, callType, data);
+            payload.put("isGroupCall", true);
+            payload.put("roomName", roomName);
+            payload.put("chatType", "room");
+
+            Object reason = data == null ? null : data.get("reason");
+            if (reason != null) {
+                payload.put("reason", String.valueOf(reason));
+            }
+
+            broadcastRoomData(roomName, from, forwardEvent, defaultMessage, payload);
+            sendMessage(session, "success", ackEvent, defaultMessage, payload);
+
+            if (shouldCreateCallLog(forwardEvent)) {
+                createAndBroadcastCallLog(session, from, roomName, callId, callType, forwardEvent, data, true);
+            }
+            return;
+        }
+
+        if (to == null) {
             sendMessage(session, "error", ackEvent, "Dữ liệu cuộc gọi không hợp lệ", null);
             return;
         }
 
         Map<String, Object> payload = buildCallPayload(from, to, callId, callType, data);
+        payload.put("isGroupCall", false);
+        payload.put("chatType", "people");
 
         Object reason = data == null ? null : data.get("reason");
         if (reason != null) {
@@ -1175,7 +1265,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         sendMessage(session, "success", ackEvent, defaultMessage, payload);
 
         if (shouldCreateCallLog(forwardEvent)) {
-            createAndBroadcastCallLog(session, from, to, callId, callType, forwardEvent, data);
+            createAndBroadcastCallLog(session, from, to, callId, callType, forwardEvent, data, false);
         }
     }
 
@@ -1192,14 +1282,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             String callId,
             String callType,
             String event,
-            Map<String, Object> data
+            Map<String, Object> data,
+            boolean isGroupCall
     ) throws Exception {
 
         if (from == null || to == null || callId == null) {
             return;
         }
 
-        String normalizedCallType = "video".equalsIgnoreCase(callType) ? "video" : "audio";
+        String normalizedCallType = normalizeCallType(callType);
         String reason = readString(data, "reason");
         Long durationSeconds = readLong(data, "durationSeconds", "duration", "durationInSeconds");
 
@@ -1208,12 +1299,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         String callStatus = resolveCallStatus(event, reason, durationSeconds);
-
         String caller = readString(data, "caller", "callerUsername");
         String receiver = readString(data, "receiver", "receiverUsername");
 
         if (caller == null || receiver == null) {
-            if ("CALL_REJECTED".equals(event)) {
+            if (isGroupCall) {
+                caller = readString(data, "caller", "callerUsername");
+                if (caller == null) {
+                    caller = from;
+                }
+                receiver = to;
+            } else if ("CALL_REJECTED".equals(event)) {
                 caller = to;
                 receiver = from;
             } else {
@@ -1233,12 +1329,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         callLog.put("receiver", receiver);
         callLog.put("endedBy", from);
         callLog.put("reason", reason == null ? "" : reason);
+        callLog.put("isGroupCall", isGroupCall);
+        if (isGroupCall) {
+            callLog.put("roomName", to);
+        }
 
         String content = "[CALL]" + objectMapper.writeValueAsString(callLog);
 
         Message savedMessage = messageRepository.save(
                 Message.builder()
-                        .type("people")
+                        .type(isGroupCall ? "room" : "people")
                         .sender(from)
                         .receiver(to)
                         .content(content)
@@ -1249,7 +1349,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         Map<String, Object> messagePayload = toClientMessage(savedMessage);
 
         sendMessage(requesterSession, "success", "SEND_CHAT", "New message", messagePayload);
-        sendRealtimeToUser(to, "SEND_CHAT", "New message", messagePayload);
+
+        if (isGroupCall) {
+            broadcastRoomData(to, from, "SEND_CHAT", "New message", messagePayload);
+        } else {
+            sendRealtimeToUser(to, "SEND_CHAT", "New message", messagePayload);
+        }
     }
 
     private String resolveCallStatus(String event, String reason, Long durationSeconds) {
@@ -1284,8 +1389,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         String from = getUsernameFromSession(session);
         String to = readString(data, "to", "receiver", "user", "username", "name");
-        String callType = readString(data, "callType", "type");
+        String roomName = readString(data, "roomName", "room", "groupName");
+        String callType = normalizeCallType(readString(data, "callType", "type"));
         String callId = readString(data, "callId", "id");
+        boolean isGroupCall = isGroupCallPayload(data, roomName);
 
         if (from == null) {
             sendMessage(session, "error", event, "Bạn cần đăng nhập trước", null);
@@ -1297,7 +1404,25 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        if (isGroupCall) {
+            if (roomName == null || roomRepository.findByName(roomName).isEmpty()) {
+                sendMessage(session, "error", event, "Nhóm không tồn tại", null);
+                return;
+            }
+
+            if (!roomMemberRepository.existsByRoomNameAndUsername(roomName, from)
+                    || !roomMemberRepository.existsByRoomNameAndUsername(roomName, to)) {
+                sendMessage(session, "error", event, "Thành viên không thuộc nhóm này", null);
+                return;
+            }
+        }
+
         Map<String, Object> payload = buildCallPayload(from, to, callId, callType, data);
+        payload.put("isGroupCall", isGroupCall);
+        payload.put("chatType", isGroupCall ? "room" : "people");
+        if (roomName != null) {
+            payload.put("roomName", roomName);
+        }
 
         if (data != null) {
             if (data.containsKey("offer")) {
@@ -1331,6 +1456,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             Map<String, Object> rawData
     ) {
         Map<String, Object> payload = new LinkedHashMap<>();
+        String normalizedCallType = normalizeCallType(callType);
 
         payload.put("from", from);
         payload.put("fromUsername", from);
@@ -1338,15 +1464,48 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         payload.put("toUsername", to);
         payload.put("callId", callId);
         payload.put("id", callId);
-        payload.put("callType", "video".equalsIgnoreCase(callType) ? "video" : "audio");
-        payload.put("type", "video".equalsIgnoreCase(callType) ? "video" : "audio");
+        payload.put("callType", normalizedCallType);
+        payload.put("type", normalizedCallType);
         payload.put("createdAt", LocalDateTime.now().toString());
 
-        if (rawData != null && rawData.containsKey("roomName")) {
-            payload.put("roomName", rawData.get("roomName"));
+        if (rawData != null) {
+            if (rawData.containsKey("roomName")) {
+                payload.put("roomName", rawData.get("roomName"));
+            }
+            if (rawData.containsKey("chatType")) {
+                payload.put("chatType", rawData.get("chatType"));
+            }
+            if (rawData.containsKey("isGroupCall")) {
+                payload.put("isGroupCall", rawData.get("isGroupCall"));
+            }
         }
 
         return payload;
+    }
+
+    private String normalizeCallType(String callType) {
+        return "video".equalsIgnoreCase(callType) ? "video" : "audio";
+    }
+
+    private boolean isGroupCallPayload(Map<String, Object> data, String roomName) {
+        if (roomName != null && !roomName.isBlank()) {
+            return true;
+        }
+
+        if (data == null) {
+            return false;
+        }
+
+        Object isGroupCall = data.get("isGroupCall");
+        if (isGroupCall instanceof Boolean bool) {
+            return bool;
+        }
+        if (isGroupCall != null && "true".equalsIgnoreCase(String.valueOf(isGroupCall))) {
+            return true;
+        }
+
+        String chatType = readString(data, "chatType");
+        return "room".equalsIgnoreCase(chatType) || "group".equalsIgnoreCase(chatType);
     }
 
     // =========================================================

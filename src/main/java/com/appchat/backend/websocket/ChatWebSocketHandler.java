@@ -1998,6 +1998,28 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        AiModerationService.ModerationResult moderationResult =
+                aiModerationService.moderate(newContent);
+
+        if (!moderationResult.allowed()) {
+            Map<String, Object> moderationPayload = new LinkedHashMap<>();
+            String failureMessage = buildModerationFailureMessage(moderationResult.flags());
+
+            moderationPayload.put("rejected", true);
+            moderationPayload.put("reason", "AI_MODERATION");
+            moderationPayload.put("flags", moderationResult.flags());
+            moderationPayload.put("report", moderationResult.report());
+
+            sendMessage(
+                    session,
+                    "error",
+                    "EDIT_MESSAGE",
+                    failureMessage,
+                    moderationPayload
+            );
+            return;
+        }
+
         chatMessage.setContent(newContent);
         chatMessage.setEdited(true);
 

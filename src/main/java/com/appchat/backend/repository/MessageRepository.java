@@ -6,6 +6,7 @@ import org.springframework.data.mongodb.repository.MongoRepository;
 import org.springframework.data.mongodb.repository.Query;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -29,16 +30,16 @@ public interface MessageRepository extends MongoRepository<Message, String> {
     List<Message> findPeopleMessagesBetween(
             String userA,
             String userB,
-            java.time.LocalDateTime fromTime,
-            java.time.LocalDateTime toTime,
+            Instant fromTime,
+            Instant toTime,
             Pageable pageable
     );
 
     @Query(value = "{ 'type': 'room', 'receiver': ?0, 'createdAt': { '$gte': ?1, '$lt': ?2 } }", sort = "{ 'createdAt': -1 }")
     List<Message> findRoomMessagesBetween(
             String roomName,
-            java.time.LocalDateTime fromTime,
-            java.time.LocalDateTime toTime,
+            Instant fromTime,
+            Instant toTime,
             Pageable pageable
     );
 

@@ -1,7 +1,9 @@
 package com.appchat.backend.service;
 
 import com.appchat.backend.entity.PendingConversation;
+import com.appchat.backend.entity.User;
 import com.appchat.backend.repository.PendingConversationRepository;
+import com.appchat.backend.repository.UserRepository;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -16,6 +18,7 @@ public class PendingConversationService {
 
     private final PendingConversationRepository repository;
     private final FriendshipService friendshipService;
+    private final UserRepository userRepository;
 
     @PostConstruct
     @Transactional
@@ -28,6 +31,29 @@ public class PendingConversationService {
         repository.findByStatus("REMOVED").forEach(repository::delete);
     }
 
+    private PendingConversation populateUserDetails(PendingConversation pc) {
+        if (pc == null) {
+            return null;
+        }
+        userRepository.findByUsername(pc.getFromUsername()).ifPresent(u -> {
+            pc.setFromAvatar(u.getAvatar());
+            pc.setFromDisplayName(getEffectiveDisplayName(u));
+        });
+        userRepository.findByUsername(pc.getToUsername()).ifPresent(u -> {
+            pc.setToAvatar(u.getAvatar());
+            pc.setToDisplayName(getEffectiveDisplayName(u));
+        });
+        return pc;
+    }
+
+    private String getEffectiveDisplayName(User user) {
+        String displayName = user.getDisplayName();
+        if (displayName == null || displayName.isBlank()) {
+            return user.getUsername();
+        }
+        return displayName;
+    }
+
     public PendingConversation createRequest(String from, String to) {
         if (from == null || to == null || from.equals(to)) {
             throw new IllegalArgumentException("Người gửi hoặc người nhận không hợp lệ");
@@ -36,15 +62,15 @@ public class PendingConversationService {
         Optional<PendingConversation> existing = repository.findBetweenUsers(from, to);
 
         if (friendshipService.areFriends(from, to)) {
-            return PendingConversation.builder()
+            return populateUserDetails(PendingConversation.builder()
                     .fromUsername(from)
                     .toUsername(to)
                     .status("ACCEPTED")
-                    .build();
+                    .build());
         }
 
         if (existing.isPresent()) {
-            return existing.get();
+            return populateUserDetails(existing.get());
         }
 
 
@@ -54,27 +80,36 @@ public class PendingConversationService {
                 .status("PENDING")
                 .build();
 
-        return repository.save(pc);
+        return populateUserDetails(repository.save(pc));
     }
 
     public List<PendingConversation> getIncomingRequests(String username) {
-        return repository.findByToUsernameAndStatus(username, "PENDING");
+        return repository.findByToUsernameAndStatus(username, "PENDING")
+                .stream()
+                .map(this::populateUserDetails)
+                .toList();
     }
 
     public List<PendingConversation> getOutgoingRequests(String username) {
-        return repository.findByFromUsernameAndStatus(username, "PENDING");
+        return repository.findByFromUsernameAndStatus(username, "PENDING")
+                .stream()
+                .map(this::populateUserDetails)
+                .toList();
     }
 
     public List<PendingConversation> getAcceptedConversations(String username) {
         return friendshipService.findFriendships(username)
                 .stream()
-                .map(friendship -> PendingConversation.builder()
-                        .fromUsername(username)
-                        .toUsername(friendshipService.otherUser(friendship, username))
-                        .status("ACCEPTED")
-                        .createdAt(friendship.getCreatedAt())
-                        .updatedAt(friendship.getCreatedAt())
-                        .build())
+                .map(friendship -> {
+                    PendingConversation pc = PendingConversation.builder()
+                            .fromUsername(username)
+                            .toUsername(friendshipService.otherUser(friendship, username))
+                            .status("ACCEPTED")
+                            .createdAt(friendship.getCreatedAt())
+                            .updatedAt(friendship.getCreatedAt())
+                            .build();
+                    return populateUserDetails(pc);
+                })
                 .toList();
     }
 

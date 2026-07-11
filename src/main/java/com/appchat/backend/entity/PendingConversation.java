@@ -37,4 +37,17 @@ public class PendingConversation {
     @UpdateTimestamp
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
+
+    @Transient
+    private String fromAvatar;
+
+    @Transient
+    private String fromDisplayName;
+
+    @Transient
+    private String toAvatar;
+
+    @Transient
+    private String toDisplayName;
 }
+

@@ -64,7 +64,7 @@ public class AiModerationService {
                 }
                 return ModerationResult.blocked(
                         List.of("moderation_unavailable"),
-                        Map.of("error", ex.getMessage())
+                        Map.of("error", ex.getMessage() != null ? ex.getMessage() : "Unknown error")
                 );
             }
         }
@@ -103,7 +103,7 @@ public class AiModerationService {
 
             return ModerationResult.blocked(
                     List.of("moderation_unavailable"),
-                    Map.of("error", ex.getMessage())
+                    Map.of("error", ex.getMessage() != null ? ex.getMessage() : "Unknown error")
             );
         }
     }
